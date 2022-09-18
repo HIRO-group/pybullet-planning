@@ -6,7 +6,8 @@ from .panda_utils import set_arm_conf, REST_LEFT_ARM, open_arm, \
 from .utils import create_box, set_base_values, set_point, set_pose, get_pose, \
     get_bodies, z_rotation, load_model, load_pybullet, HideOutput, create_body, \
     get_box_geometry, get_cylinder_geometry, create_shape_array, unit_pose, Pose, BI_PANDA_URDF, \
-    Point, LockRenderer, FLOOR_URDF, TABLE_URDF, add_data_path, TAN, set_color, BASE_LINK, remove_body, BI_PANDA_PLATE_URDF
+    Point, LockRenderer, FLOOR_URDF, TABLE_URDF, add_data_path, TAN, set_color, BASE_LINK, remove_body, \
+    BI_PANDA_PLATE_URDF, PANDA_OG_URDF, PANDA_MOD_URDF
 import pybullet as p
 
 LIGHT_GREY = (0.7, 0.7, 0.7, 1.)
@@ -43,7 +44,7 @@ class Problem(object):
         self.gripper = None
         self.post_goal = post_goal
         self.gripper_ori = gripper_ori
-    def get_gripper(self, arm='left', visual=True):
+    def get_gripper(self, arm='right', visual=True):
         # upper = get_max_limit(problem.robot, get_gripper_joints(problem.robot, 'left')[0])
         # set_configuration(gripper, [0]*4)
         # dump_body(gripper)
@@ -68,6 +69,13 @@ def create_bi_panda():
             bi_panda = load_model(BI_PANDA_PLATE_URDF, fixed_base=True)
             # bi_panda = load_model(BI_PANDA_PLATE_URDF, fixed_base=True)
     return bi_panda
+
+def create_panda():
+    with LockRenderer():
+        with HideOutput():
+            panda = load_model(PANDA_MOD_URDF, fixed_base=True)
+            # bi_panda = load_model(BI_PANDA_PLATE_URDF, fixed_base=True)
+    return panda
 
 def create_bi_panda_with_gripper():
     with LockRenderer():

@@ -28,7 +28,7 @@ from .transformations import quaternion_from_matrix, unit_vector, euler_from_qua
 
 directory = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(directory, '../motion'))
-from motion_planners.rrt_connect import birrt
+from motion_planners.rrt_connect import birrt, birrt_force_aware
 from motion_planners.meta import direct_path
 from pybullet_utils import bullet_client as bc
 from pybullet_utils import urdfEditor as ed
@@ -84,6 +84,7 @@ PR2_GRIPPER = 'pr2_gripper.urdf'
 PANDA_URDF = 'franka_panda/panda.urdf'
 
 PANDA_OG_URDF = "models/franka_description/robots/panda.urdf"
+PANDA_MOD_URDF = "models/bi_panda/panda_mod.urdf"
 BI_PANDA_URDF = "models/bi_panda/bi_panda_shifted.urdf"
 BI_PANDA_PLATE_URDF = "models/bi_panda/bi_panda_shifted_plate.urdf"
 TRAY_URDF = "/home/liam/dev/bi-manual-forceful-manipulation/bi-manual-tamp/examples/pybullet/utils/models/bi_panda/tray.urdf"
@@ -3151,7 +3152,7 @@ def approximate_as_cylinder(body, **kwargs):
 
 # Collision
 
-MAX_DISTANCE = 0 # 0. | 1e-3
+MAX_DISTANCE = 0.005 # 0. | 1e-3
 
 CollisionPair = namedtuple('Collision', ['body', 'links'])
 
@@ -3241,6 +3242,7 @@ def any_link_pair_collision(body1, links1, body2, links2=None, **kwargs):
         if (body1 == body2) and (link1 == link2):
             continue
         if pairwise_link_collision(body1, link1, body2, link2, **kwargs):
+            print("pairwise link collision")
             return True
     return False
 
@@ -3254,7 +3256,10 @@ def pairwise_collision(body1, body2, **kwargs):
         body1, links1 = expand_links(body1)
         body2, links2 = expand_links(body2)
         return any_link_pair_collision(body1, links1, body2, links2, **kwargs)
-    return body_collision(body1, body2, **kwargs)
+    val = body_collision(body1, body2, **kwargs)
+    if val:
+        print('body collision', body1, body2)
+    return val
 
 def pairwise_collisions(body, obstacles, link=None, **kwargs):
     return any(pairwise_collision(body1=body, body2=other, link1=link, **kwargs)
@@ -3528,6 +3533,7 @@ def get_collision_fn(body, joints, obstacles, attachments, self_collisions, disa
     # TODO: sort bodies by bounding box size
 
     def collision_fn(q, verbose=True):
+        print("in collision fn")
         if not all_between(lower_limits, q, upper_limits):
             print(q)
             print("upper: ", upper_limits)
@@ -3556,11 +3562,11 @@ def get_collision_fn(body, joints, obstacles, attachments, self_collisions, disa
         #             #print(get_body_name(body1), get_body_name(body2))
         #             if verbose: print(body1, body2)
         #             return True
-        # for body1, body2 in product(moving_bodies, obstacles):
-        #     if (not use_aabb or aabb_overlap(get_moving_aabb(body1), get_obstacle_aabb(body2))) \
-        #             and pairwise_collision(body1, body2, **kwargs):
-        #         if verbose: print(get_name(body1.body), get_name(body2))
-        #         return True
+        for body1, body2 in product(moving_bodies, obstacles):
+            if (not use_aabb or aabb_overlap(get_moving_aabb(body1), get_obstacle_aabb(body2))) \
+                    and pairwise_collision(body1, body2, **kwargs):
+                if verbose: print(get_name(body1.body), get_name(body2))
+                return True
         return False
     return collision_fn
 
@@ -3598,6 +3604,46 @@ def plan_direct_joint_motion(body, joints, end_conf, waypoints=None, **kwargs):
         return plan_waypoints_joint_motion(body, joints, [end_conf], **kwargs)
     return plan_waypoints_joint_motion(body, joints, waypoints, **kwargs)
 
+def interpolate_joint_waypoints_force_aware(body, joints, waypoints, torque_fn, resolutions=None,
+                                collision_fn=lambda *args, **kwargs: False, **kwargs):
+    # TODO: unify with refine_path
+    extend_fn = get_extend_fn(body, joints, resolutions=resolutions, **kwargs)
+    path = waypoints[:1]
+    for waypoint in waypoints[1:]:
+        assert len(joints) == len(waypoint)
+        for q in list(extend_fn(path[-1], waypoint)):
+            if collision_fn(q):
+                return None
+            if not torque_fn(q):
+                return None
+            path.append(q) # TODO: could instead yield
+    return path
+
+def plan_waypoints_joint_motion_force_aware(body, joints, waypoints, torque_fn, start_conf=None, obstacles=[], attachments=[],
+                                self_collisions=True, disabled_collisions=set(),
+                                resolutions=None, custom_limits={}, max_distance=MAX_DISTANCE,
+                                use_aabb=False, cache=True):
+    if start_conf is None:
+        start_conf = get_joint_positions(body, joints)
+    assert len(start_conf) == len(joints)
+    collision_fn = get_collision_fn(body, joints, obstacles, attachments, self_collisions, disabled_collisions,
+                                    custom_limits=custom_limits, max_distance=max_distance,
+                                    use_aabb=use_aabb, cache=cache)
+    waypoints = [start_conf] + list(waypoints)
+    for i, waypoint in enumerate(waypoints):
+        if collision_fn(waypoint):
+            #print('Warning: waypoint configuration {}/{} is in collision'.format(i, len(waypoints)))
+            return None
+        if not torque_fn(waypoint):
+            return None
+    return interpolate_joint_waypoints_force_aware(body, joints, waypoints, torque_fn, resolutions=resolutions, collision_fn=collision_fn)
+
+
+def plan_direct_joint_motion_force_aware(body, joints, end_conf, torque_fn, waypoints=None, **kwargs):
+    if waypoints == None:
+        return plan_waypoints_joint_motion_force_aware(body, joints, [end_conf], torque_fn, **kwargs)
+    return plan_waypoints_joint_motion_force_aware(body, joints, waypoints, torque_fn, **kwargs)
+
 def check_initial_end(start_conf, end_conf, collision_fn, verbose=True):
     # TODO: collision_fn might not accept kwargs
     if collision_fn(start_conf, verbose=verbose):
@@ -3605,6 +3651,23 @@ def check_initial_end(start_conf, end_conf, collision_fn, verbose=True):
         return False
     if collision_fn(end_conf, verbose=verbose):
         print('Warning: end configuration is in collision')
+        return False
+    return True
+
+def check_initial_end_force_aware(start_conf, end_conf, collision_fn, torque_fn, verbose=True):
+    # TODO: collision_fn might not accept kwargs
+    if collision_fn(start_conf, verbose=verbose):
+        print('Warning: initial configuration is in collision')
+        return False
+    if collision_fn(end_conf, verbose=verbose):
+        print('Warning: end configuration is in collision')
+        return False
+    if not torque_fn(start_conf):
+        print('Warning: initial configuration excedes torque limits')
+        print(start_conf)
+        return False
+    if not torque_fn(end_conf):
+        print('Warning: end configuration excedes torque limits')
         return False
     return True
 
@@ -3628,6 +3691,27 @@ def plan_joint_motion(body, joints, end_conf, obstacles=[], attachments=[],
     if not check_initial_end(start_conf, end_conf, collision_fn):
         return None
     return birrt(start_conf, end_conf, distance_fn, sample_fn, extend_fn, collision_fn, **kwargs)
+
+def plan_joint_motion_force_aware(body, joints, end_conf, torque_fn, obstacles=[], attachments=[],
+                      self_collisions=True, disabled_collisions=set(),
+                      weights=None, resolutions=None, max_distance=MAX_DISTANCE,
+                      use_aabb=False, cache=True, custom_limits={}, **kwargs):
+
+    assert len(joints) == len(end_conf)
+    if (weights is None) and (resolutions is not None):
+        weights = np.reciprocal(resolutions)
+    sample_fn = get_sample_fn(body, joints, custom_limits=custom_limits)
+    distance_fn = get_distance_fn(body, joints, weights=weights)
+    extend_fn = get_extend_fn(body, joints, resolutions=resolutions)
+    collision_fn = get_collision_fn(body, joints, obstacles, attachments, self_collisions, disabled_collisions,
+                                    custom_limits=custom_limits, max_distance=max_distance,
+                                    use_aabb=use_aabb, cache=cache)
+
+    start_conf = get_joint_positions(body, joints)
+
+    if not check_initial_end_force_aware(start_conf, end_conf, collision_fn, torque_fn):
+        return None
+    return birrt_force_aware(start_conf, end_conf, distance_fn, sample_fn, extend_fn, collision_fn, torque_fn, **kwargs)
     #return plan_lazy_prm(start_conf, end_conf, sample_fn, extend_fn, collision_fn)
 
 plan_holonomic_motion = plan_joint_motion

@@ -49,8 +49,21 @@ gripper_from_side = gripper_from_arm
 
 #####################################
 
+# BI_PANDA_GROUPS = {
+#     "base": ["bi_panda_base_joint"],
+#     arm_from_arm(LEFT_ARM): ['l_panda_joint1', 'l_panda_joint2', 'l_panda_joint3','l_panda_joint4',
+#                             'l_panda_joint5', 'l_panda_joint6', 'l_panda_joint7'],
+#     arm_from_arm(RIGHT_ARM): ['r_panda_joint1', 'r_panda_joint2', 'r_panda_joint3','r_panda_joint4',
+#                             'r_panda_joint5', 'r_panda_joint6', 'r_panda_joint7'],
+#     # gripper_from_arm(LEFT_ARM): ['l_panda_hand_joint', 'l_panda_finger_joint1',
+#     #                              'l_panda_finger_joint2', 'l_panda_grasptarget_hand'],
+#     gripper_from_arm(LEFT_ARM): ['l_panda_hand_joint', 'l_panda_grasptarget_hand'],
+#     gripper_from_arm(RIGHT_ARM): ['r_panda_hand_joint', 'r_panda_finger_joint1',
+#                                  'r_panda_finger_joint2', 'r_panda_grasptarget_hand'],
+# }
+
 BI_PANDA_GROUPS = {
-    "base": ["bi_panda_base_joint"],
+    "base": ["r_panda_joint1"],
     arm_from_arm(LEFT_ARM): ['l_panda_joint1', 'l_panda_joint2', 'l_panda_joint3','l_panda_joint4',
                             'l_panda_joint5', 'l_panda_joint6', 'l_panda_joint7'],
     arm_from_arm(RIGHT_ARM): ['r_panda_joint1', 'r_panda_joint2', 'r_panda_joint3','r_panda_joint4',
@@ -93,9 +106,9 @@ PANDA_BASE_LINK = 'bi_panda_base'
 # Arm tool poses
 # TOOL_POSE = ([0.18, 0., 0.], [0., 0.70710678, 0., 0.70710678]) # l_gripper_palm_link
 
-# TOOL_POSE = Pose(point=Point(0, 0.0, 0.1),euler=Euler(roll= 0,pitch=0, yaw=0))
-
 TOOL_POSE = Pose(point=Point(0, 0.0, 0.1),euler=Euler(roll= 0,pitch=0, yaw=0))
+
+TOOL_POSE = Pose()
 
 #TOOL_DIRECTION = [0., 0., 1.]
 
@@ -103,10 +116,10 @@ TOOL_POSE = Pose(point=Point(0, 0.0, 0.1),euler=Euler(roll= 0,pitch=0, yaw=0))
 
 # Special configurations
 EXTENDED_LEFT_ARM = [0, PI/2, 0.0, 0, 0, PI, PI/4]
-TOP_HOLDING_LEFT_ARM = [0, -PI/8, 0.0, -PI/2, 0, PI/2, PI/4]
+TOP_HOLDING_LEFT_ARM = [0, -PI/6, 0.0, -4*PI/6, 0, PI/2, PI/4]
 # TOP_HOLDING_LEFT_ARM_CENTERED = [PI, PI/4, PI, -5*PI/8, 0, 1.1, PI/3-.1]
-TOP_HOLDING_LEFT_ARM_CENTERED = [0, -PI/8, 0.0, -PI/3, 0, PI/2, -PI/2]
-SIDE_HOLDING_LEFT_ARM = [0, PI/8, PI, -PI/3, PI, 0.9*PI/2 - PI/2, 3*PI/4]
+TOP_HOLDING_LEFT_ARM_CENTERED = TOP_HOLDING_LEFT_ARM
+SIDE_HOLDING_LEFT_ARM = [0, -PI/3, 0.0, -6*PI/7, PI/2, PI, -PI/4]
 PLATE_GRASP_LEFT_ARM = (-PI/2, PI/2, PI/2, 0, -PI/2, PI, -.8) #conf1 (full extention)
 # PLATE_GRASP_LEFT_ARM = (2.738075540455348, -1.0511912675226134, 1.661103190049066, -1.7925175734541483, 2.9376307693720434, 2.560233704556581, 1.9969144035623807) #conf2 (y + .15)
 # PLATE_GRASP_LEFT_ARM = (-2.294879695595039, 1.5832628386682441, 1.7345099367795827, -1.114102236770833, -2.889488979972084, 2.7345415776468744, 0.407272004954351) # Y + .025
@@ -320,20 +333,20 @@ close_gripper = close_arm
 # Box grasps
 
 #GRASP_LENGTH = 0.04
-GRASP_LENGTH = 0.09
-#GRASP_LENGTH = -0.01
+# GRASP_LENGTH = 0.02
+GRASP_LENGTH = 0.
 
 #MAX_GRASP_WIDTH = 0.07
 MAX_GRASP_WIDTH = np.inf
 
-SIDE_HEIGHT_OFFSET = 0.03 # z distance from top of object
+SIDE_HEIGHT_OFFSET = -0.2 # z distance from top of object
 
 def get_top_grasps(body, under=False, tool_pose=TOOL_POSE, body_pose=unit_pose(),
                    max_width=MAX_GRASP_WIDTH, grasp_length=GRASP_LENGTH):
     # TODO: rename the box grasps
     center, (w, l, h) = approximate_as_prism(body, body_pose=body_pose)
     reflect_z = Pose(euler=[0, math.pi, 0])
-    translate_z = Pose(point=[0, 0, h / 2 - grasp_length])
+    translate_z = Pose(point=[0, 0, (h / 2) - grasp_length])
     translate_center = Pose(point=point_from_pose(body_pose)-center)
     grasps = []
     if w <= max_width:
