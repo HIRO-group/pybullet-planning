@@ -1913,10 +1913,10 @@ def set_joint_position_torque(body, joint, value):
 
 def set_joint_positions_torque(body, joints, values, velocities=None):
     max_forces = [get_max_force(body, joint) for joint in joints]
-    # velocities = [.01]*len(joints)
-    # if velocities is not None:
-    #     p.setJointMotorControlArray(body, joints, p.POSITION_CONTROL, forces = max_forces, targetPositions=values)
-    p.setJointMotorControlArray(body, joints, p.POSITION_CONTROL, targetPositions=values, forces = max_forces)
+    if velocities is not None:
+        p.setJointMotorControlArray(body, joints, p.POSITION_CONTROL, targetPositions=values, forces = max_forces, targetVelocities=velocities)
+    else:
+        p.setJointMotorControlArray(body, joints, p.POSITION_CONTROL, targetPositions=values, forces = max_forces)
 
 def set_joint_states(body, joints, positions, velocities):
     assert len(joints) == len(positions) == len(velocities)
@@ -3519,28 +3519,39 @@ def get_self_link_pairs(body, joints, disabled_collisions=set(), only_moving=Tru
                                                 (pair[::-1] not in disabled_collisions), check_link_pairs))
     return check_link_pairs
 
-def get_collision_fn(body, joints, obstacles, attachments, self_collisions, disabled_collisions,
+def can_collide(body, link=BASE_LINK, **kwargs):
+    return len(get_collision_data(body, link=link, **kwargs)) != 0
+
+def get_limits_fn(body, joints, custom_limits={}, verbose=False):
+    lower_limits, upper_limits = get_custom_limits(body, joints, custom_limits)
+
+    def limits_fn(q):
+        if not all_between(lower_limits, q, upper_limits):
+            #print('Joint limits violated')
+            #if verbose: print(lower_limits, q, upper_limits)
+            return True
+        return False
+    return limits_fn
+
+def get_collision_fn(body, joints, obstacles=[], attachments=[], self_collisions=True, disabled_collisions=set(),
                      custom_limits={}, use_aabb=False, cache=False, max_distance=MAX_DISTANCE, **kwargs):
     # TODO: convert most of these to keyword arguments
     check_link_pairs = get_self_link_pairs(body, joints, disabled_collisions) if self_collisions else []
-    moving_links = frozenset(get_moving_links(body, joints))
+    moving_links = frozenset(link for link in get_moving_links(body, joints)
+                             if can_collide(body, link)) # TODO: propagate elsewhere
     attached_bodies = [attachment.child for attachment in attachments]
     moving_bodies = [CollisionPair(body, moving_links)] + list(map(parse_body, attached_bodies))
-    # moving_bodies = list(flatten(flatten_links(*pair) for pair in moving_bodies)) # Introduces overhead
-    # moving_bodies = [body] + [attachment.child for attachment in attachments]
-    lower_limits, upper_limits = get_custom_limits(body, joints, custom_limits)
+    #moving_bodies = list(flatten(flatten_links(*pair) for pair in moving_bodies)) # Introduces overhead
+    #moving_bodies = [body] + [attachment.child for attachment in attachments]
     get_obstacle_aabb = cached_fn(get_buffered_aabb, cache=cache, max_distance=max_distance/2., **kwargs)
+    limits_fn = get_limits_fn(body, joints, custom_limits=custom_limits)
     # TODO: sort bodies by bounding box size
+    # TODO: cluster together links that remain rigidly attached to reduce the number of checks
 
-    def collision_fn(q, verbose=True):
-        print("in collision fn")
-        if not all_between(lower_limits, q, upper_limits):
-            print(q)
-            print("upper: ", upper_limits)
-            print("lower: ", lower_limits)
-            print('Joint limits violated')
-            if verbose: print(lower_limits, q, upper_limits)
+    def collision_fn(q, verbose=False):
+        if limits_fn(q):
             return True
+        use_aabb = False
         set_joint_positions(body, joints, q)
         for attachment in attachments:
             attachment.assign()
@@ -3552,21 +3563,29 @@ def get_collision_fn(body, joints, obstacles, attachments, self_collisions, disa
             # TODO: self-collisions between body and attached_bodies (except for the link adjacent to the robot)
             if (not use_aabb or aabb_overlap(get_moving_aabb(body), get_moving_aabb(body))) and \
                     pairwise_link_collision(body, link1, body, link2): #, **kwargs):
-                print("COLLISIOn: ",get_body_name(body), get_link_name(body, link1), get_link_name(body, link2))
+                #print(get_body_name(body), get_link_name(body, link1), get_link_name(body, link2))
                 if verbose: print(body, link1, body, link2)
                 return True
-        # step_simulation()
+
+        # #step_simulation()
+        # #update_scene()
         # for body1 in moving_bodies:
-        #     for body2, _ in get_bodies_in_region(get_moving_aabb(body1)):
-        #         if (body2 in obstacles) and pairwise_collision(body1, body2, **kwargs):
+        #     overlapping_pairs = [(body2, link2) for body2, link2 in get_bodies_in_region(get_moving_aabb(body1))
+        #                          if body2 in obstacles]
+        #     overlapping_bodies = {body2 for body2, _ in overlapping_pairs}
+        #     for body2 in overlapping_bodies:
+        #         if pairwise_collision(body1, body2, **kwargs):
         #             #print(get_body_name(body1), get_body_name(body2))
         #             if verbose: print(body1, body2)
         #             return True
-        for body1, body2 in product(moving_bodies, obstacles):
-            if (not use_aabb or aabb_overlap(get_moving_aabb(body1), get_obstacle_aabb(body2))) \
-                    and pairwise_collision(body1, body2, **kwargs):
-                if verbose: print(get_name(body1.body), get_name(body2))
-                return True
+        # return False
+
+        # for body1, body2 in product(moving_bodies, obstacles):
+        #     if (not use_aabb or aabb_overlap(get_moving_aabb(body1), get_obstacle_aabb(body2))) \
+        #             and pairwise_collision(body1, body2, **kwargs):
+        #         #print(get_body_name(body1), get_body_name(body2))
+        #         if verbose: print(body1, body2)
+        #         return True
         return False
     return collision_fn
 
@@ -3604,7 +3623,7 @@ def plan_direct_joint_motion(body, joints, end_conf, waypoints=None, **kwargs):
         return plan_waypoints_joint_motion(body, joints, [end_conf], **kwargs)
     return plan_waypoints_joint_motion(body, joints, waypoints, **kwargs)
 
-def interpolate_joint_waypoints_force_aware(body, joints, waypoints, torque_fn, resolutions=None,
+def interpolate_joint_waypoints_force_aware(body, joints, waypoints, torque_fn, dynam_fn, resolutions=None,
                                 collision_fn=lambda *args, **kwargs: False, **kwargs):
     # TODO: unify with refine_path
     extend_fn = get_extend_fn(body, joints, resolutions=resolutions, **kwargs)
@@ -3616,10 +3635,24 @@ def interpolate_joint_waypoints_force_aware(body, joints, waypoints, torque_fn, 
                 return None
             if not torque_fn(q):
                 return None
-            path.append(q) # TODO: could instead yield
+    vels1 = [[0.0]*len(joints)]
+    accels1 = [[0.0]*len(joints)]
+    vels2 = [[0.0]*len(joints)]
+    accels2 = [[0.0]*len(joints)]
+    for i in range(1,len(path)//2):
+        vel1, acc1 = dynam_fn(path[i], path[i-1], vels1[-1], accels1[-1])
+        vels1.append(vel1)
+        accels1.append(acc1)
+    for i in range(len(path)-2, len(path)//2 -1, -1):
+        vel2, acc2 = dynam_fn(path[i], path[i+1], vels2[0], accels2[0])
+        vels2 = [vel2] + vels2
+        accels2 = [acc2] + accels2
+    vels = vels1 + vels2
+    accels = accels1 + accels2
+    path.append(q) # TODO: could in stead yield
     return path
 
-def plan_waypoints_joint_motion_force_aware(body, joints, waypoints, torque_fn, start_conf=None, obstacles=[], attachments=[],
+def plan_waypoints_joint_motion_force_aware(body, joints, waypoints, torque_fn, dynam_fn, start_conf=None, obstacles=[], attachments=[],
                                 self_collisions=True, disabled_collisions=set(),
                                 resolutions=None, custom_limits={}, max_distance=MAX_DISTANCE,
                                 use_aabb=False, cache=True):
@@ -3630,19 +3663,34 @@ def plan_waypoints_joint_motion_force_aware(body, joints, waypoints, torque_fn, 
                                     custom_limits=custom_limits, max_distance=max_distance,
                                     use_aabb=use_aabb, cache=cache)
     waypoints = [start_conf] + list(waypoints)
+    vels1 = [[0.0]*len(joints)]
+    accels1 = [[0.0]*len(joints)]
+    vels2 = [[0.0]*len(joints)]
+    accels2 = [[0.0]*len(joints)]
+    for i in range(1,len(waypoints)//2):
+        vel1, acc1 = dynam_fn(waypoints[i], waypoints[i-1], vels1[-1], accels1[-1])
+        vels1.append(vel1)
+        accels1.append(acc1)
+    for i in range(len(waypoints)-2, len(waypoints)//2 -1, -1):
+        vel2, acc2 = dynam_fn(waypoints[i], waypoints[i+1], vels2[0], accels2[0])
+        vels2 = [vel2] + vels2
+        accels2 = [acc2] + accels2
+    vels = vels1 + vels2
+    accels = accels1 + accels2
     for i, waypoint in enumerate(waypoints):
         if collision_fn(waypoint):
             #print('Warning: waypoint configuration {}/{} is in collision'.format(i, len(waypoints)))
             return None
-        if not torque_fn(waypoint):
-            return None
-    return interpolate_joint_waypoints_force_aware(body, joints, waypoints, torque_fn, resolutions=resolutions, collision_fn=collision_fn)
+        if i > 0:
+            if not torque_fn(waypoint, velocities=vels[1], accelerations=accels[i]):
+                return None
+    return interpolate_joint_waypoints_force_aware(body, joints, waypoints, torque_fn, dynam_fn, resolutions=resolutions, collision_fn=collision_fn)
 
 
-def plan_direct_joint_motion_force_aware(body, joints, end_conf, torque_fn, waypoints=None, **kwargs):
+def plan_direct_joint_motion_force_aware(body, joints, end_conf, torque_fn, dynam_fn, waypoints=None, **kwargs):
     if waypoints == None:
-        return plan_waypoints_joint_motion_force_aware(body, joints, [end_conf], torque_fn, **kwargs)
-    return plan_waypoints_joint_motion_force_aware(body, joints, waypoints, torque_fn, **kwargs)
+        return plan_waypoints_joint_motion_force_aware(body, joints, [end_conf], torque_fn, dynam_fn, **kwargs)
+    return plan_waypoints_joint_motion_force_aware(body, joints, waypoints, torque_fn, dynam_fn, **kwargs)
 
 def check_initial_end(start_conf, end_conf, collision_fn, verbose=True):
     # TODO: collision_fn might not accept kwargs
@@ -3692,7 +3740,7 @@ def plan_joint_motion(body, joints, end_conf, obstacles=[], attachments=[],
         return None
     return birrt(start_conf, end_conf, distance_fn, sample_fn, extend_fn, collision_fn, **kwargs)
 
-def plan_joint_motion_force_aware(body, joints, end_conf, torque_fn, obstacles=[], attachments=[],
+def plan_joint_motion_force_aware(body, joints, end_conf, torque_fn, dynam_fn, obstacles=[], attachments=[],
                       self_collisions=True, disabled_collisions=set(),
                       weights=None, resolutions=None, max_distance=MAX_DISTANCE,
                       use_aabb=False, cache=True, custom_limits={}, **kwargs):
@@ -3711,7 +3759,7 @@ def plan_joint_motion_force_aware(body, joints, end_conf, torque_fn, obstacles=[
 
     if not check_initial_end_force_aware(start_conf, end_conf, collision_fn, torque_fn):
         return None
-    return birrt_force_aware(start_conf, end_conf, distance_fn, sample_fn, extend_fn, collision_fn, torque_fn, **kwargs)
+    return birrt_force_aware(start_conf, end_conf, distance_fn, sample_fn, extend_fn, collision_fn, torque_fn, dynam_fn, **kwargs)
     #return plan_lazy_prm(start_conf, end_conf, sample_fn, extend_fn, collision_fn)
 
 plan_holonomic_motion = plan_joint_motion
@@ -4287,7 +4335,7 @@ def velocity_control_joints(body, joints, velocities):
 
 #####################################
 
-def compute_jacobian(robot, link, positions=None, joints=None):
+def compute_jacobian(robot, link, positions=None, joints=None, velocities=None, accelerations=None):
     if not joints:
         joints = get_movable_joints(robot)
     if positions:
@@ -4295,8 +4343,15 @@ def compute_jacobian(robot, link, positions=None, joints=None):
     if positions is None:
         positions = get_joint_positions(robot, joints)
     assert len(joints) == len(positions)
-    velocities = [0.0] * len(positions)
-    accelerations = [0.0] * len(positions)
+    if velocities == None:
+        velocities = [0.0] * len(positions)
+    else:
+        velocities += [0]*(len(joints)-len(velocities))
+    if accelerations == None:
+        accelerations = [0.0] * len(positions)
+    else:
+        accelerations += [0]*(len(joints)-len(accelerations))
+    print(len(velocities), len(accelerations))
     translate, rotate = p.calculateJacobian(robot, link, unit_point(), positions,
                                             velocities, accelerations, physicsClientId=CLIENT)
     #movable_from_joints(robot, joints)

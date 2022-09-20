@@ -18,7 +18,7 @@ class Problem(object):
                  goal_conf=None, goal_holding=tuple(), goal_on=tuple(),
                  goal_cleaned=tuple(), goal_cooked=tuple(), costs=False,
                  body_names={}, body_types=[], base_limits=None, holding_arm = None,
-                 holding_grasp = None, target_width=0, post_goal=None, gripper_ori=None):
+                 holding_grasp = None, target_width=0, post_goal=None, gripper_ori=None, time_step=.01):
         self.robot = robot
         self.arms = arms
         self.movable = movable
@@ -44,6 +44,7 @@ class Problem(object):
         self.gripper = None
         self.post_goal = post_goal
         self.gripper_ori = gripper_ori
+        self.time_step = time_step
     def get_gripper(self, arm='right', visual=True):
         # upper = get_max_limit(problem.robot, get_gripper_joints(problem.robot, 'left')[0])
         # set_configuration(gripper, [0]*4)

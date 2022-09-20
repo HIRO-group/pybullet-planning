@@ -150,9 +150,9 @@ class BodyPath(object):
         for values in self.path:
             for _ in joint_controller(self.body, self.joints, values):
                 enable_gravity()
-                if not real_time:
-                    step_simulation()
-                time.sleep(dt)
+                # # if not real_time:
+                # #     step_simulation()
+                # time.sleep(dt)
     # def full_path(self, q0=None):
     #     # TODO: could produce sequence of savers
     def refine(self, num_steps=0):

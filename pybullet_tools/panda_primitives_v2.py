@@ -1,14 +1,16 @@
 from __future__ import print_function
 
 import copy
+from this import d
+from xml.dom import NotFoundErr
 import pybullet as p
 import random
 import numpy as np
 import time
 from itertools import islice, count
-
+import panda_dynamics_model as pdm
 import numpy as np
-
+import scipy
 from .ikfast.franka_panda.ik import is_ik_compiled, ikfast_inverse_kinematics, PANDA_LEFT_INFO, bi_panda_inverse_kinematics, PANDA_RIGHT_INFO
 from .ikfast.utils import USE_CURRENT, USE_ALL
 from .pr2_problems import get_fixed_bodies
@@ -40,8 +42,8 @@ import csv
 
 BASE_EXTENT = 2.5
 BASE_LIMITS = (-BASE_EXTENT*np.ones(2), BASE_EXTENT*np.ones(2))
-GRASP_LENGTH = 0.03
-APPROACH_DISTANCE = 0.07 + GRASP_LENGTH
+GRASP_LENGTH = -0.02
+APPROACH_DISTANCE = 0.02 + GRASP_LENGTH
 SELF_COLLISIONS = False
 TABLE = 3
 
@@ -99,7 +101,7 @@ class Grasp(object):
         return 'g{}'.format(id(self) % 1000)
 
 class Conf(object):
-    def __init__(self, body, joints, values=None, init=False):
+    def __init__(self, body, joints, values=None, init=False, velocities=None):
         self.body = body
         self.joints = joints
         if values is None:
@@ -107,13 +109,14 @@ class Conf(object):
         self.values = tuple(values)
         self.init = init
         self.torque_joints = {}
+        self.velocities = velocities[:len(joints)] if velocities is not None else velocities
 
     @property
     def bodies(self): # TODO: misnomer
         return flatten_links(self.body, get_moving_links(self.body, self.joints))
     def assign(self, bodies=[]):
-        print('assigning conf:', self.values)
-        set_joint_positions_torque(self.body, self.joints, self.values)
+        print(self.velocities)
+        set_joint_positions_torque(self.body, self.joints, self.values, self.velocities)
     def iterate(self):
         yield self
     def __repr__(self):
@@ -241,7 +244,7 @@ class Trajectory(Command):
             if isinstance(conf, Pose):
                 conf = conf.to_base_conf()
             for _ in joint_controller_hold(conf.body, conf.joints, conf.values):
-                step_simulation()
+                # step_simulation()
                 time.sleep(dt)
     def to_points(self, link=BASE_LINK):
         # TODO: this is computationally expensive
@@ -284,8 +287,16 @@ def reset_torques_exceded_global():
     global torques_exceded
     torques_exceded = False
 
-def create_trajectory(robot, joints, path, bodies):
-    return Trajectory([Conf(robot, joints, q) for q in path], bodies=bodies)
+def create_trajectory(robot, joints, path, bodies, velocities=None):
+    confs = []
+    index = 0
+    if velocities is not None:
+        for i in range(len(velocities)):
+            confs.append(Conf(robot, joints, path[i], velocities=velocities[i]))
+            index+=1
+    for i in range(index, len(path)):
+            confs.append(Conf(robot, joints, path[i], velocities=None))
+    return Trajectory(confs, bodies=bodies)
 
 ##################################################
 
@@ -344,7 +355,7 @@ class Attach(Command):
             joints = joints_from_names(self.robot, BI_PANDA_GROUPS[gripper_name])
             values = [get_min_limit(self.robot, joint) for joint in joints] # Closed
             for _ in joint_controller_hold(self.robot, joints, values):
-                step_simulation()
+                # step_simulation()
                 time.sleep(dt)
     def __repr__(self):
         return '{}({},{},{})'.format(self.__class__.__name__, get_body_name(self.robot),
@@ -651,39 +662,72 @@ def get_torque_limits_not_exceded_test_v2(problem, arm, mass=None):
         totalMass = get_mass(problem.movable[-1])
     comR = []
     totalMass = 0
-    def test(poses = None, ptotalMass = None):
+    def test(poses = None, ptotalMass = None, velocities=None, accelerations=None):
         # return True
         totalMass = ptotalMass
         print("in torque test")
         if totalMass is None:
             totalMass = get_mass(problem.movable[-1])
+        if velocities == None or accelerations == None:
+            velocities = [0]*len(poses)
+            accelerations = [0]*len(poses)
         with LockRenderer(lock=True):
             hold = get_joint_positions(robot, joints)
             set_joint_positions(robot, joints, poses)
-            Jl, Ja = compute_jacobian(problem.robot, ee_link)
+            accelerations += [0.0] * 2
+            velocities += [0.0] * 2
+            Jl, Ja = compute_jacobian(problem.robot, ee_link, velocities=velocities, accelerations=accelerations)
+            M = pdm.get_mass_matrix(poses)
+            p = np.ndarray(())
+            C = pdm.get_coriolis_matrix(np.asarray([poses[:7]], dtype=np.float64).transpose(), np.asarray([velocities[:7]], dtype=np.float64).transpose())
+            torquesInert = np.matmul(M, accelerations[:7])
+            torquesC = np.matmul(C, velocities[:7])
+            torquesG = pdm.get_gravity_vector(poses)
+
             set_joint_positions(robot, joints, hold)
-            Jl = np.array(Jl)[:7,:].transpose()
-            Ja = np.array(Ja)[:7,:].transpose()
+            Jl = np.array(Jl).transpose()
+            Ja = np.array(Ja).transpose()
             
             J = np.concatenate((Jl, Ja))
 
             print(J.shape)
             # J = np.transpose(J)
-            J = np.transpose(J)
+            Jt = np.transpose(J)
             print(J.shape)
-            force = totalMass * 9.8
-            
-            force3d = np.array([0, 0, force, 0, 0, 0])
+            force = totalMass * -9.8
+            toolV = np.matmul(J, velocities)
+            v = np.array(toolV[:3])
+            w = np.array(toolV[3:])
+            aOR = np.cross(v, w)/ (np.linalg.norm(w)**2)
+            fCoriolis = -2 * totalMass * np.cross(v, w)
+            fCentrifugal = np.cross(-totalMass * w, np.cross(w, aOR))
+            fFictitious = fCoriolis + fCentrifugal
+            force3d = np.array([fFictitious[0], fFictitious[1], force + fFictitious[2], 0, 0, 0])
             # print(force3d)
             # print(len(J), len(J[0]))
-            torques = np.matmul(J, force3d)
-            for i in range(len(torques)):
+            torquesExt = np.matmul(Jt, force3d)
+            torques = torquesExt[:7] + torquesInert + torquesC + torquesG
+            for i in range(len(max_limits)-1):
                 if (abs(torques[i]) >= max_limits[i]*EPS):
                     print("torque test: FAILED", i, torques[i])
+                    print("Velocities: ", velocities)
+                    print("Accelerations: ", accelerations)
                     return False
             print("torque test: PASSED")
             return True
     return test
+
+def get_dynamics_fn(problem):
+    t = problem.time_step
+    def dynam_fn(q, prev_q, prev_v, prev_a):
+        acc = [0]*len(q)
+        vel = [0]*len(q)
+        for i in range(len(q)):
+            dist = q[i] - prev_q[i]
+            vel[i]  = dist/t
+            acc[i] = (prev_v[i]-vel[i])/t
+        return vel, acc
+    return dynam_fn
 
 originalJointPoses = None
 prevOriginalJointPoses = None
@@ -813,7 +857,7 @@ def get_sample_stable_holding_conf_gen_v2(problem, custom_limits={}, max_attempt
                     path = plan_joint_motion(robot, jointNums, newJointAngles, attachments=attachments.values(),
                                             obstacles=obstacles, self_collisions=SELF_COLLISIONS,
                                             custom_limits=custom_limits, resolutions=resolutions,
-                                            restarts=4, iterations=100, smooth=None)
+                                            restarts=4, iterations=25, smooth=None)
 
                     if path is None:
                         print("Failed to find reconfig path")
@@ -879,7 +923,7 @@ def get_ik_fn(problem, custom_limits={}, collisions=True, teleport=True):
         if teleport:
             path = [default_conf, approach_conf, grasp_conf]
         else:
-            resolutions = 0.05**np.ones(len(arm_joints))
+            resolutions = 0.01**np.ones(len(arm_joints))
             grasp_path = plan_direct_joint_motion(robot, arm_joints, grasp_conf, attachments=attachments.values(),
                                                   obstacles=approach_obstacles, self_collisions=SELF_COLLISIONS,
                                                   custom_limits={}, resolutions=resolutions/2.)
@@ -910,6 +954,7 @@ def get_ik_fn_force_aware(problem, custom_limits={}, collisions=True, teleport=T
     obstacles = problem.fixed + problem.surfaces if collisions else []
     # torque_test_left = get_torque_limits_not_exceded_test_v2(problem, 'left')
     torque_test_right = get_torque_limits_not_exceded_test_v2(problem, 'right')
+    dynam_fn = get_dynamics_fn(problem)
     def fn(arm, obj, pose, grasp, reconfig=None):
         torque_test = torque_test_left if arm == 'left' else torque_test_right
         approach_obstacles = {obst for obst in obstacles if not is_placement(obj, obst)}
@@ -927,7 +972,8 @@ def get_ik_fn_force_aware(problem, custom_limits={}, collisions=True, teleport=T
         ikfaskt_info = PANDA_RIGHT_INFO
         gripper_link = link_from_name(robot, PANDA_GRIPPER_ROOTS[arm])
         grasp_conf = None
-        # custom_limits[-2] = (default_conf[-2]-.01, default_conf[-2]+.01)
+        # custom_limits[-2] = (default_conf[-2]-.1, default_conf[-2]+.1)
+        # custom_limits[-1] = (default_conf[-1]-.001, default_conf[-1]+.001)
         grasp_conf = bi_panda_inverse_kinematics(robot, arm, arm_link, gripper_pose, max_attempts=25, max_time=3.5, obstacles=obstacles)
         if (grasp_conf is None) or any(pairwise_collision(robot, b) for b in obstacles): # [obj]
             print('Grasp IK failure', grasp_conf)
@@ -956,23 +1002,24 @@ def get_ik_fn_force_aware(problem, custom_limits={}, collisions=True, teleport=T
         if teleport:
             path = [default_conf, approach_conf, grasp_conf]
         else:
-            resolutions = 0.05**np.ones(len(arm_joints))
-            grasp_path = plan_direct_joint_motion_force_aware(robot, arm_joints, grasp_conf, torque_test, attachments=attachments.values(),
+            resolutions = 0.01**np.ones(len(arm_joints))
+            grasp_path = plan_direct_joint_motion_force_aware(robot, arm_joints, grasp_conf, torque_test, dynam_fn, attachments=attachments.values(),
                                                   obstacles=approach_obstacles, self_collisions=SELF_COLLISIONS,
                                                   custom_limits={}, resolutions=resolutions/2.)
             if grasp_path is None:
                 print('Grasp path failure')
                 return None
             set_joint_positions(robot, arm_joints, default_conf)
-            approach_path = plan_joint_motion_force_aware(robot, arm_joints, approach_conf, torque_test, attachments=attachments.values(),
+            approach_data = plan_joint_motion_force_aware(robot, arm_joints, approach_conf, torque_test, dynam_fn, attachments=attachments.values(),
                                               obstacles=obstacles, self_collisions=SELF_COLLISIONS,
                                               custom_limits=custom_limits, resolutions=resolutions,
-                                              restarts=4, iterations=25, smooth=None)
-            if approach_path is None:
+                                              restarts=4, iterations=10, smooth=None)
+            if approach_data is None or approach_data[0] is None:
                 print('Approach path failure')
                 return None
+            (approach_path, approach_vels, _) = approach_data
             path = approach_path + grasp_path
-        mt = create_trajectory(robot, arm_joints, path, bodies = problem.movable)
+        mt = create_trajectory(robot, arm_joints, path, bodies = problem.movable, velocities=approach_vels)
         if reconfig is not None:
             cmd = Commands(State(attachments=attachments), savers=[BodySaver(robot)], commands=[reconfig, mt])
         else:
@@ -1623,3 +1670,179 @@ def greedy_find_waypoints_stable_gripper(start_conf, end_conf, target_ori, joint
             start_conf = confs[index]
     print("(((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((",path)
     return path
+
+
+def get_dynamics_fn_v2(problem):
+    from numpy.linalg import inv
+
+    def min_jerk(pos=None, dur=None, vel=None, acc=None, psg=None):
+
+        N = pos.shape[0]					# number of point
+        D = pos.shape[1]					# dimensionality
+
+        if not vel:
+            vel = np.zeros((2,D))			# default endpoint vel is 0
+        if not acc:
+            acc = np.zeros((2,D))			# default endpoint acc is 0
+
+        t0 = np.array([[0],[dur]])
+
+        if not psg:					# passage times unknown, optimize
+            if N > 2:
+                psg = np.arange(dur/(N-1), dur-dur/(N-1)+1, dur/(N-1)).T
+                func = lambda psg_: mjCOST(psg_, pos, vel, acc, t0)
+                psg = scipy.optimize.fmin(func = func, x0 = psg)
+            else:
+                psg = []
+
+        print(psg)
+        trj = mjTRJ(psg, pos, vel, acc, t0, dur)
+
+        return trj, psg
+
+    ################################################################
+    ###### Compute jerk cost
+    ################################################################
+
+    def mjCOST(t, x, v0, a0, t0):
+
+        N = max(x.shape)
+        D = min(x.shape)
+
+        v, a = mjVelAcc(t, x, v0, a0, t0)
+        aa   = np.concatenate(([a0[0][:]], a, [a0[1][:]]), axis = 0)
+        aa0  = aa[0:N-1][:]
+        aa1  = aa[1:N][:]
+        vv   = np.concatenate(([v0[0][:]], v, [v0[1][:]]), axis = 0)
+        vv0  = vv[0:N-1][:]
+        vv1  = vv[1:N][:]
+        tt   = np.concatenate((t0[0]   , t, t0[1]   ), axis = 0)
+        T    = np.diff(tt)[np.newaxis].T*np.ones((1,D))
+        xx0  = x[0:N-1][:]
+        xx1  = x[1:N][:]
+
+        j=3*(3*aa0**2*T**4-2*aa0*aa1*T**4+3*aa1**2*T**4+24*aa0*T**3*vv0- \
+            16*aa1*T**3*vv0 + 64*T**2*vv0**2 + 16*aa0*T**3*vv1 - \
+            24*aa1*T**3*vv1 + 112*T**2*vv0*vv1 + 64*T**2*vv1**2 + \
+            40*aa0*T**2*xx0 - 40*aa1*T**2*xx0 + 240*T*vv0*xx0 + \
+            240*T*vv1*xx0 + 240*xx0**2 - 40*aa0*T**2*xx1 + 40*aa1*T**2*xx1- \
+            240*T*vv0*xx1 - 240*T*vv1*xx1 - 480*xx0*xx1 + 240*xx1**2)/T**5
+
+        J = sum(sum(abs(j)))
+
+        return J
+
+    ################################################################
+    ###### Compute trajectory
+    ################################################################
+
+    def mjTRJ(tx, x, v0, a0, t0, P):
+
+        N = max(x.shape)
+        D = min(x.shape)
+        X_list = []
+        aa = a0
+        vv = v0
+        tt = t0
+        if len(tx) > 0:
+            v, a = mjVelAcc(tx, x, v0, a0, t0)
+            aa   = np.concatenate(([a0[0][:]],  a, [a0[1][:]]), axis = 0)
+            vv   = np.concatenate(([v0[0][:]],  v, [v0[1][:]]), axis = 0)
+            tt   = np.concatenate((t0[0], tx,t0[1]), axis = 0)
+
+        ii = 0
+        for i in range(1,int(P)+1):
+            t = (i-1)/(P-1)*(t0[1]-t0[0]) + t0[0]
+            if t > tt[ii+1]:
+                ii = ii+1
+            T = (tt[ii+1]-tt[ii])*np.ones((1,D))
+            t = (t-tt[ii])*np.ones((1,D))
+            aa0 = aa[ii][:]
+            aa1 = aa[ii+1][:]
+            vv0 = vv[ii][:]
+            vv1 = vv[ii+1][:]
+            xx0 = x[ii][:]
+            xx1 = x[ii+1][:]
+
+            tmp = aa0*t**2/2 + t*vv0 + xx0 + t**4*(3*aa0*T**2/2 - aa1*T**2 + \
+                                                8*T*vv0 + 7*T*vv1 + 15*xx0 - 15*xx1)/T**4 + \
+                t**5*(-(aa0*T**2)/2 + aa1*T**2/2 - 3*T*vv0 - 3*T*vv1 - 6*xx0+ \
+                        6*xx1)/T**5 + t**3*(-3*aa0*T**2/2 + aa1*T**2/2 - 6*T*vv0 - \
+                                            4*T*vv1 - 10*xx0 + 10*xx1)/T**3
+            X_list.append(tmp)
+
+        X = np.concatenate(X_list)
+
+        return X, aa, vv
+
+    ################################################################
+    ###### Compute intermediate velocities and accelerations
+    ################################################################
+
+    def mjVelAcc(t, x, v0, a0, t0):
+
+        N = max(x.shape)
+        D = min(x.shape)
+        mat = np.zeros((2*N-4,2*N-4))
+        vec = np.zeros((2*N-4,D))
+        tt = np.concatenate((t0[0], t, t0[1]), axis = 0)
+
+        for i in range(1, 2*N-4+1, 2):
+
+            ii = int(math.ceil(i/2.0))
+            T0 = tt[ii]-tt[ii-1]
+            T1 = tt[ii+1]-tt[ii]
+
+            tmp = [-6/T0, -48/T0**2, 18*(1/T0+1/T1), \
+                72*(1/T1**2-1/T0**2), -6/T1, 48/T1**2]
+
+            if i == 1:
+                le = 0
+            else:
+                le = -2
+
+            if i == 2*N-5:
+                ri = 1
+            else:
+                ri = 3
+
+            mat[i-1][i+le-1:i+ri] = tmp[3+le-1:3+ri]
+            vec[i-1][:] = 120*(x[ii-1][:]-x[ii][:])/T0**3 \
+                        + 120*(x[ii+1][:]-x[ii][:])/T1**3
+
+        for i in range(2, 2*N-4+1, 2):
+
+            ii = int(math.ceil(i/2.0))
+            T0 = tt[ii]-tt[ii-1]
+            T1 = tt[ii+1]-tt[ii]
+
+            tmp = [48/T0**2, 336/T0**3, 72*(1/T1**2-1/T0**2), \
+                384*(1/T1**3+1/T0**3), -48/T1**2, 336/T1**3]
+
+            if i == 2:
+                le = -1
+            else:
+                le = -3
+
+            if i == 2*N-4:
+                ri = 0
+            else:
+                ri = 2
+
+            mat[i-1][i+le-1:i+ri] = tmp[4+le-1:4+ri]
+            vec[i-1][:] = 720*(x[ii][:]-x[ii-1][:])/T0**4 \
+                        + 720*(x[ii+1][:]-x[ii][:])/T1**4
+
+        T0 = tt[1] - tt[0]
+        T1 = tt[N-1]-tt[N-2]
+        vec[0][:] = vec[0][:] +  6/T0*a0[0][:]    +  48/T0**2*v0[0][:]
+        vec[1][:] = vec[1][:] - 48/T0**2*a0[0][:] - 336/T0**3*v0[0][:]
+        vec[2*N-6][:] = vec[2*N-6][:] +  6/T1*a0[1][:]    -  48/T1**2*v0[1][:]
+        vec[2*N-5][:] = vec[2*N-5][:] + 48/T1**2*a0[1][:] - 336/T1**3*v0[1][:]
+
+        avav = inv(mat).dot(vec)
+        a = avav[0:2*N-4:2][:]
+        v = avav[1:2*N-4:2][:]
+
+        return v, a
+    return min_jerk

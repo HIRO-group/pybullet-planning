@@ -23,7 +23,7 @@ PANDA_LEFT_INFO = IKFastInfo(module_name='franka_panda.ikfast_panda_arm', base_l
                         ee_link='l_panda_link8', free_joints=['l_panda_joint7'])
 
 PANDA_RIGHT_INFO = IKFastInfo(module_name='franka_panda.ikfast_panda_arm', base_link='r_panda_link0',
-                        ee_link='r_panda_grasptarget', free_joints=['r_panda_joint7'])
+                        ee_link='r_panda_link8', free_joints=['r_panda_joint7'])
 
 info = {'left': PANDA_LEFT_INFO, 'right': PANDA_RIGHT_INFO}
 
