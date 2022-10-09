@@ -29,6 +29,7 @@ from .transformations import quaternion_from_matrix, unit_vector, euler_from_qua
 directory = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(directory, '../motion'))
 from motion_planners.rrt_connect import birrt, birrt_force_aware
+from motion_planners.rrt_star import rrt_star_force_aware
 from motion_planners.meta import direct_path
 from pybullet_utils import bullet_client as bc
 from pybullet_utils import urdfEditor as ed
@@ -3152,7 +3153,7 @@ def approximate_as_cylinder(body, **kwargs):
 
 # Collision
 
-MAX_DISTANCE = 0.005 # 0. | 1e-3
+MAX_DISTANCE = 0.05 # 0. | 1e-3
 
 CollisionPair = namedtuple('Collision', ['body', 'links'])
 
@@ -3212,10 +3213,11 @@ def draw_collision_info(collision_info, **kwargs):
         handles.extend(draw_point(point, **kwargs))
     return handles
 
-def get_closest_points(body1, body2, link1=None, link2=None, max_distance=MAX_DISTANCE, use_aabb=False):
+def get_closest_points(body1, body2, link1=None, link2=None, max_distance=-MAX_DISTANCE, use_aabb=False):
     if use_aabb and not aabb_overlap(get_buffered_aabb(body1, link1, max_distance=max_distance/2.),
                                      get_buffered_aabb(body2, link2, max_distance=max_distance/2.)):
         return []
+
     if (link1 is None) and (link2 is None):
         results = p.getClosestPoints(bodyA=body1, bodyB=body2, distance=max_distance, physicsClientId=CLIENT)
     elif link2 is None:
@@ -3243,6 +3245,7 @@ def any_link_pair_collision(body1, links1, body2, links2=None, **kwargs):
             continue
         if pairwise_link_collision(body1, link1, body2, link2, **kwargs):
             print("pairwise link collision")
+            print(f'body1: {body1}, link1:{link1}, body2: {body2}, link2: {link2}')
             return True
     return False
 
@@ -3551,7 +3554,6 @@ def get_collision_fn(body, joints, obstacles=[], attachments=[], self_collisions
     def collision_fn(q, verbose=False):
         if limits_fn(q):
             return True
-        use_aabb = False
         set_joint_positions(body, joints, q)
         for attachment in attachments:
             attachment.assign()
@@ -3580,12 +3582,12 @@ def get_collision_fn(body, joints, obstacles=[], attachments=[], self_collisions
         #             return True
         # return False
 
-        # for body1, body2 in product(moving_bodies, obstacles):
-        #     if (not use_aabb or aabb_overlap(get_moving_aabb(body1), get_obstacle_aabb(body2))) \
-        #             and pairwise_collision(body1, body2, **kwargs):
-        #         #print(get_body_name(body1), get_body_name(body2))
-        #         if verbose: print(body1, body2)
-        #         return True
+        for body1, body2 in product(moving_bodies, obstacles):
+            if (not use_aabb or aabb_overlap(get_moving_aabb(body1), get_obstacle_aabb(body2))) \
+                    and pairwise_collision(body1, body2, **kwargs):
+                #print(get_body_name(body1), get_body_name(body2))
+                if verbose: print(body1, body2)
+                return True
         return False
     return collision_fn
 
@@ -3635,21 +3637,11 @@ def interpolate_joint_waypoints_force_aware(body, joints, waypoints, torque_fn, 
                 return None
             if not torque_fn(q):
                 return None
-    vels1 = [[0.0]*len(joints)]
-    accels1 = [[0.0]*len(joints)]
-    vels2 = [[0.0]*len(joints)]
-    accels2 = [[0.0]*len(joints)]
-    for i in range(1,len(path)//2):
-        vel1, acc1 = dynam_fn(path[i], path[i-1], vels1[-1], accels1[-1])
-        vels1.append(vel1)
-        accels1.append(acc1)
-    for i in range(len(path)-2, len(path)//2 -1, -1):
-        vel2, acc2 = dynam_fn(path[i], path[i+1], vels2[0], accels2[0])
-        vels2 = [vel2] + vels2
-        accels2 = [acc2] + accels2
-    vels = vels1 + vels2
-    accels = accels1 + accels2
     path.append(q) # TODO: could in stead yield
+    path, _, vels, accels = dynam_fn(path, len(path))
+    for i in range(len(path)):
+        if not torque_fn(path[i], velocities=vels[i], accelerations=accels[i]):
+            return None
     return path
 
 def plan_waypoints_joint_motion_force_aware(body, joints, waypoints, torque_fn, dynam_fn, start_conf=None, obstacles=[], attachments=[],
@@ -3742,15 +3734,15 @@ def plan_joint_motion(body, joints, end_conf, obstacles=[], attachments=[],
 
 def plan_joint_motion_force_aware(body, joints, end_conf, torque_fn, dynam_fn, obstacles=[], attachments=[],
                       self_collisions=True, disabled_collisions=set(),
-                      weights=None, resolutions=None, max_distance=MAX_DISTANCE,
+                      weights=None, radius=None, max_distance=MAX_DISTANCE,
                       use_aabb=False, cache=True, custom_limits={}, **kwargs):
 
     assert len(joints) == len(end_conf)
-    if (weights is None) and (resolutions is not None):
-        weights = np.reciprocal(resolutions)
+    if (weights is None) and (radius is not None):
+        weights = np.reciprocal(radius)
     sample_fn = get_sample_fn(body, joints, custom_limits=custom_limits)
     distance_fn = get_distance_fn(body, joints, weights=weights)
-    extend_fn = get_extend_fn(body, joints, resolutions=resolutions)
+    extend_fn = get_extend_fn(body, joints, resolutions=radius)
     collision_fn = get_collision_fn(body, joints, obstacles, attachments, self_collisions, disabled_collisions,
                                     custom_limits=custom_limits, max_distance=max_distance,
                                     use_aabb=use_aabb, cache=cache)
@@ -3758,8 +3750,8 @@ def plan_joint_motion_force_aware(body, joints, end_conf, torque_fn, dynam_fn, o
     start_conf = get_joint_positions(body, joints)
 
     if not check_initial_end_force_aware(start_conf, end_conf, collision_fn, torque_fn):
-        return None
-    return birrt_force_aware(start_conf, end_conf, distance_fn, sample_fn, extend_fn, collision_fn, torque_fn, dynam_fn, **kwargs)
+        return None, None, None
+    return rrt_star_force_aware(start_conf, end_conf, distance_fn, sample_fn, extend_fn, collision_fn, torque_fn, dynam_fn, radius=[0], **kwargs)
     #return plan_lazy_prm(start_conf, end_conf, sample_fn, extend_fn, collision_fn)
 
 plan_holonomic_motion = plan_joint_motion

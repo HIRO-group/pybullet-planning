@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 import copy
+from copy import copy as copy_fn
 from this import d
 from xml.dom import NotFoundErr
 import pybullet as p
@@ -9,6 +10,7 @@ import numpy as np
 import time
 from itertools import islice, count
 import panda_dynamics_model as pdm
+from .panda_model import Panda
 import numpy as np
 import scipy
 from .ikfast.franka_panda.ik import is_ik_compiled, ikfast_inverse_kinematics, PANDA_LEFT_INFO, bi_panda_inverse_kinematics, PANDA_RIGHT_INFO
@@ -19,7 +21,7 @@ from .panda_utils import TOP_HOLDING_LEFT_ARM_CENTERED, TOP_HOLDING_LEFT_ARM, SI
     learned_pose_generator, PANDA_TOOL_FRAMES, get_x_presses, BI_PANDA_GROUPS, joints_from_names, arm_from_arm,\
     is_drake_pr2, get_group_joints, get_group_conf, compute_grasp_width, PANDA_GRIPPER_ROOTS, get_group_links, \
     are_forces_balanced, get_other_arm, TARGET, PLATE_GRASP_LEFT_ARM
-from .utils import invert, multiply, get_name, set_pose, get_link_pose, is_placement, \
+from .utils import get_max_velocities, invert, multiply, get_name, set_pose, get_link_pose, is_placement, \
     pairwise_collision, set_joint_positions, get_joint_positions, sample_placement, get_pose, waypoints_from_path, \
     unit_quat, plan_base_motion, plan_joint_motion, base_values_from_pose, pose_from_base_values, \
     uniform_pose_generator, sub_inverse_kinematics, add_fixed_constraint, remove_debug, remove_fixed_constraint, \
@@ -35,6 +37,7 @@ from .utils import invert, multiply, get_name, set_pose, get_link_pose, is_place
     get_mass, LockRenderer, plan_direct_joint_motion_force_aware, plan_joint_motion_force_aware
 import math
 import csv
+import roboticstoolbox as rtb
 # GRASP_INFO = {
 #     'top': GraspInfo(lambda body: get_top_grasps(body, under=True, tool_pose=Pose(), max_width=INF,  grasp_length=0),
 #                      approach_pose=Pose(0.1*Point(z=1))),
@@ -42,8 +45,8 @@ import csv
 
 BASE_EXTENT = 2.5
 BASE_LIMITS = (-BASE_EXTENT*np.ones(2), BASE_EXTENT*np.ones(2))
-GRASP_LENGTH = -0.02
-APPROACH_DISTANCE = 0.02 + GRASP_LENGTH
+GRASP_LENGTH = -0.01
+APPROACH_DISTANCE = -.01 + GRASP_LENGTH
 SELF_COLLISIONS = False
 TABLE = 3
 
@@ -511,7 +514,7 @@ def get_stable_gen(problem, collisions=True, **kwargs):
             p.assign()
             if are_forces_balanced(body, p, surface,robot, link, problem.movable) and not any(pairwise_collision(body, obst) for obst in obstacles if obst not in {body, surface}):
                 if surface == body_from_name(TARGET):
-                    p.value = ((p.value[0][0],p.value[0][1],p.value[0][2]),p.value[1])
+                    p.value = ((p.value[0][0],p.value[0][1],p.value[0][2]+ 0.05),p.value[1])
                     p.assign()
                 yield (p,)
     # TODO: apply the acceleration technique here
@@ -660,7 +663,6 @@ def get_torque_limits_not_exceded_test_v2(problem, arm, mass=None):
     totalMass = mass
     if totalMass is None:
         totalMass = get_mass(problem.movable[-1])
-    comR = []
     totalMass = 0
     def test(poses = None, ptotalMass = None, velocities=None, accelerations=None):
         # return True
@@ -694,15 +696,21 @@ def get_torque_limits_not_exceded_test_v2(problem, arm, mass=None):
             # J = np.transpose(J)
             Jt = np.transpose(J)
             print(J.shape)
-            force = totalMass * -9.8
+            force = totalMass * 9.81
             toolV = np.matmul(J, velocities)
+
             v = np.array(toolV[:3])
-            w = np.array(toolV[3:])
-            aOR = np.cross(v, w)/ (np.linalg.norm(w)**2)
+            #since the robot is located at 0,0,0 dont have to switch frames for R
+            r = np.array(get_link_pose(robot, ee_link)[0][:3])
+            w = np.cross(r, v)
             fCoriolis = -2 * totalMass * np.cross(v, w)
-            fCentrifugal = np.cross(-totalMass * w, np.cross(w, aOR))
-            fFictitious = fCoriolis + fCentrifugal
-            force3d = np.array([fFictitious[0], fFictitious[1], force + fFictitious[2], 0, 0, 0])
+            fCentrifugal = np.cross(-totalMass * w, np.cross(w, r))
+            fFictitious = np.array(-fCoriolis - fCentrifugal)
+            fFictitious = np.append(fFictitious, [0.0,0.0,0.0])
+            forceReal = np.array([0, 0, force,
+                                #  totalMass*toolA[3], totalMass*toolA[4], totalMass*toolA[5]])
+                                 0, 0, 0])
+            force3d = forceReal
             # print(force3d)
             # print(len(J), len(J[0]))
             torquesExt = np.matmul(Jt, force3d)
@@ -716,6 +724,48 @@ def get_torque_limits_not_exceded_test_v2(problem, arm, mass=None):
             print("torque test: PASSED")
             return True
     return test
+
+def get_torque_limits_not_exceded_test_v3(problem, arm, mass=None):
+    robot = problem.robot
+    max_limits = []
+    baseLink = 1
+    joints = get_arm_joints(robot, arm)
+    for joint in joints:
+            max_limits.append(get_max_force(problem.robot, joint))
+    ee_link = get_gripper_link(robot, arm)
+    EPS =  1
+    totalMass = mass
+    if totalMass is None:
+        totalMass = get_mass(problem.movable[-1])
+    comR = []
+    dynamModel = Panda()
+    totalMass = 0
+    def test(poses = None, ptotalMass = None, velocities=None, accelerations=None):
+        totalMass = ptotalMass
+        if totalMass is None:
+            totalMass = get_mass(problem.movable[-1])
+        if velocities == None or accelerations == None:
+            velocities = [0]*len(poses)
+            accelerations = [0]*len(poses)
+        print("total mass: ", totalMass)
+        dynamModel.payload(totalMass)
+        print(len(poses), len(velocities), len(accelerations))
+        torques = dynamModel.rne(poses, velocities, accelerations)
+        for i in range(len(max_limits)-1):
+            if (abs(torques[i]) >= max_limits[i]*EPS):
+                print("torque test: FAILED", i, torques[i])
+                print("Velocities: ", velocities)
+                print("Accelerations: ", accelerations)
+                dynamModel.payload(0)
+                return False
+        dynamModel.payload(0)
+        print("torque test: PASSED")
+        print(max_limits)
+        return True
+        
+    return test
+
+
 
 def get_dynamics_fn(problem):
     t = problem.time_step
@@ -934,7 +984,7 @@ def get_ik_fn(problem, custom_limits={}, collisions=True, teleport=True):
             approach_path = plan_joint_motion(robot, arm_joints, approach_conf, attachments=attachments.values(),
                                               obstacles=obstacles, self_collisions=SELF_COLLISIONS,
                                               custom_limits=custom_limits, resolutions=resolutions,
-                                              restarts=4, iterations2=5, smooth=None)
+                                              restarts=4, iterations=5, smooth=None)
             if approach_path is None:
                 print('Approach path failure')
                 return None
@@ -953,8 +1003,8 @@ def get_ik_fn_force_aware(problem, custom_limits={}, collisions=True, teleport=T
     robot = problem.robot
     obstacles = problem.fixed + problem.surfaces if collisions else []
     # torque_test_left = get_torque_limits_not_exceded_test_v2(problem, 'left')
-    torque_test_right = get_torque_limits_not_exceded_test_v2(problem, 'right')
-    dynam_fn = get_dynamics_fn(problem)
+    torque_test_right = get_torque_limits_not_exceded_test_v3(problem, 'right')
+    
     def fn(arm, obj, pose, grasp, reconfig=None):
         torque_test = torque_test_left if arm == 'left' else torque_test_right
         approach_obstacles = {obst for obst in obstacles if not is_placement(obj, obst)}
@@ -963,6 +1013,8 @@ def get_ik_fn_force_aware(problem, custom_limits={}, collisions=True, teleport=T
         arm_link = get_gripper_link(robot, arm)
         # arm_link = link_from_name(robot, 'r_panda_link8')
         arm_joints = get_arm_joints(robot, arm)
+        resolutions = 0.1**np.ones(len(arm_joints))
+        dynam_fn = get_dynamics_fn_v3(problem, resolutions)
         objMass = get_mass(obj)
         objPose = get_pose(obj)[0]
         default_conf = arm_conf(arm, grasp.carry)
@@ -984,41 +1036,43 @@ def get_ik_fn_force_aware(problem, custom_limits={}, collisions=True, teleport=T
         # if grasp_conf is None:
         print("found grasp")
         set_joint_positions(robot, arm_joints, default_conf)
-        approach_conf = sub_inverse_kinematics(robot, arm_joints[0], arm_link, approach_pose, custom_limits=custom_limits)
-        # approach_conf = bi_panda_inverse_kinematics(robot, arm, arm_link, approach_pose, max_attempts=5, max_time=3.5, obstacles=obstacles)
-        if (approach_conf is None) or any(pairwise_collision(robot, b) for b in obstacles + [obj]):
-            print('Approach IK failure', approach_conf)
-            print('In collision: ', any(pairwise_collision(robot, b) for b in obstacles + [obj]))
-            #wait_if_gui()
-            return None
-        print(approach_conf)
-        print(len(approach_conf), len(arm_joints))
-        approach_conf = get_joint_positions(robot, arm_joints)
-        if not torque_test(approach_conf):
-            print('approach conf torques exceded')
-            return None
+        # approach_conf = sub_inverse_kinematics(robot, arm_joints[0], arm_link, approach_pose, custom_limits=custom_limits)
+        # if (approach_conf is None) or any(pairwise_collision(robot, b) for b in obstacles + [obj]):
+        #     print('Approach IK failure', approach_conf)
+        #     print('In collision: ', any(pairwise_collision(robot, b) for b in obstacles + [obj]))
+        #     #wait_if_gui()
+        #     return None
+        # print(approach_conf)
+        # print(len(approach_conf), len(arm_joints))
+        # approach_conf = get_joint_positions(robot, arm_joints)
+        # if not torque_test(approach_conf):
+        #     print('approach conf torques exceded')
+        #     return None
         attachment = grasp.get_attachment(problem.robot, arm)
         attachments = {attachment.child: attachment}
         if teleport:
             path = [default_conf, approach_conf, grasp_conf]
         else:
-            resolutions = 0.01**np.ones(len(arm_joints))
-            grasp_path = plan_direct_joint_motion_force_aware(robot, arm_joints, grasp_conf, torque_test, dynam_fn, attachments=attachments.values(),
-                                                  obstacles=approach_obstacles, self_collisions=SELF_COLLISIONS,
-                                                  custom_limits={}, resolutions=resolutions/2.)
-            if grasp_path is None:
-                print('Grasp path failure')
-                return None
+            # grasp_path = plan_direct_joint_motion_force_aware(robot, arm_joints, grasp_conf, torque_test, dynam_fn, attachments=attachments.values(),
+            #                                       obstacles=approach_obstacles, self_collisions=SELF_COLLISIONS,
+            #                                       custom_limits={}, resolutions=resolutions/2.)
+            # if grasp_path is None:
+            #     print('Grasp path failure')
+            #     return None
             set_joint_positions(robot, arm_joints, default_conf)
-            approach_data = plan_joint_motion_force_aware(robot, arm_joints, approach_conf, torque_test, dynam_fn, attachments=attachments.values(),
+            # approach_path, approach_vels, _ = plan_joint_motion_force_aware(robot, arm_joints, approach_conf, torque_test, dynam_fn, attachments=attachments.values(),
+            #                                   obstacles=obstacles, self_collisions=SELF_COLLISIONS,
+            #                                   custom_limits=custom_limits, resolutions=resolutions,
+            #                                   restarts=4, iterations=25, smooth=25)
+            approach_path, approach_vels, _ = plan_joint_motion_force_aware(robot, arm_joints, grasp_conf, torque_test, dynam_fn, attachments=attachments.values(),
                                               obstacles=obstacles, self_collisions=SELF_COLLISIONS,
-                                              custom_limits=custom_limits, resolutions=resolutions,
-                                              restarts=4, iterations=10, smooth=None)
-            if approach_data is None or approach_data[0] is None:
+                                              custom_limits=custom_limits, radius=resolutions,
+                                              max_iterations=25)
+            if approach_path is None:
                 print('Approach path failure')
                 return None
-            (approach_path, approach_vels, _) = approach_data
-            path = approach_path + grasp_path
+           
+            path = approach_path #+ grasp_path
         mt = create_trajectory(robot, arm_joints, path, bodies = problem.movable, velocities=approach_vels)
         if reconfig is not None:
             cmd = Commands(State(attachments=attachments), savers=[BodySaver(robot)], commands=[reconfig, mt])
@@ -1676,7 +1730,7 @@ def get_dynamics_fn_v2(problem):
     from numpy.linalg import inv
 
     def min_jerk(pos=None, dur=None, vel=None, acc=None, psg=None):
-
+        pos = np.array(pos)
         N = pos.shape[0]					# number of point
         D = pos.shape[1]					# dimensionality
 
@@ -1696,9 +1750,9 @@ def get_dynamics_fn_v2(problem):
                 psg = []
 
         print(psg)
-        trj = mjTRJ(psg, pos, vel, acc, t0, dur)
+        trj, vels, accels = mjTRJ(psg, pos, vel, acc, t0, dur)
 
-        return trj, psg
+        return trj, psg, vels, accels
 
     ################################################################
     ###### Compute jerk cost
@@ -1741,14 +1795,10 @@ def get_dynamics_fn_v2(problem):
         N = max(x.shape)
         D = min(x.shape)
         X_list = []
-        aa = a0
-        vv = v0
-        tt = t0
-        if len(tx) > 0:
-            v, a = mjVelAcc(tx, x, v0, a0, t0)
-            aa   = np.concatenate(([a0[0][:]],  a, [a0[1][:]]), axis = 0)
-            vv   = np.concatenate(([v0[0][:]],  v, [v0[1][:]]), axis = 0)
-            tt   = np.concatenate((t0[0], tx,t0[1]), axis = 0)
+        v, a = mjVelAcc(tx, x, v0, a0, t0)
+        aa   = np.concatenate(([a0[0][:]],  a, [a0[1][:]]), axis = 0)
+        vv   = np.concatenate(([v0[0][:]],  v, [v0[1][:]]), axis = 0)
+        tt   = np.concatenate((t0[0], tx,t0[1]), axis = 0)
 
         ii = 0
         for i in range(1,int(P)+1):
@@ -1773,7 +1823,7 @@ def get_dynamics_fn_v2(problem):
 
         X = np.concatenate(X_list)
 
-        return X, aa, vv
+        return X, vv, aa
 
     ################################################################
     ###### Compute intermediate velocities and accelerations
@@ -1846,3 +1896,54 @@ def get_dynamics_fn_v2(problem):
 
         return v, a
     return min_jerk
+
+def get_dynamics_fn_v3(problem, resolutions):  
+    from ruckig import InputParameter, OutputParameter, Result, Ruckig
+    arm_joints = get_arm_joints(problem.robot, arm_from_arm('right'))
+    num_joints = len(arm_joints)
+    
+    max_velocities = get_max_velocities(problem.robot, arm_joints)
+    def dynam_fn(path, dur = None, vel0 = [0.0]*num_joints, acc0=[0.0]*num_joints):
+        otg = Ruckig(num_joints, 0.01, 100)  # DoFs, control cycle rate, maximum number of intermediate waypoints for memory allocation
+        inp = InputParameter(num_joints)  # DoFs
+        out = OutputParameter(num_joints, len(path))  # DoFs, maximum number of intermediate waypoints for memory allocation
+        inp.current_position = path[0]
+        inp.current_velocity = vel0
+        inp.current_acceleration = acc0
+
+        inp.intermediate_positions = path[1:len(path)]
+        inp.intermediate_positions = otg.filter_intermediate_positions(inp, resolutions)
+        print(inp.intermediate_positions)
+        inp.target_position = path[-1]
+        inp.target_velocity = [0.0]*num_joints
+        inp.target_acceleration = [0.0]*num_joints
+        
+        inp.max_velocity = max_velocities
+        inp.max_acceleration = [15, 7.5, 10, 12.5, 15, 20, 20]
+        inp.max_jerk = [7500, 3750, 5000, 6250, 7500, 10000, 10000]
+        first_output, out_list = None, []
+        res = Result.Working
+        while res == Result.Working:
+            try:
+                res = otg.update(inp, out)
+                # print('\t'.join([f'{out.time:0.3f}'] + [f'{p:0.3f}' for p in out.new_position]))
+                out_list.append(copy_fn(out))
+
+                out.pass_to_input(inp)
+
+                if not first_output:
+                    first_output = copy_fn(out)
+            except RuntimeError as e:
+                print('experienced runtime error returning no path')
+                return None, None, None, None
+        trj = []
+        psg = []
+        vels = []
+        accels = []
+        for pt in out_list:
+            trj.append(pt.new_position)
+            vels.append(pt.new_velocity)
+            accels.append(pt.new_acceleration)
+        return trj, psg, vels, accels
+        
+    return dynam_fn
