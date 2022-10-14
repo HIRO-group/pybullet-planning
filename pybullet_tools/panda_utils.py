@@ -25,6 +25,7 @@ from .transformations import euler_from_quaternion
 LEFT_ARM = 'left'
 RIGHT_ARM = 'right'
 ARM_NAMES = (LEFT_ARM, RIGHT_ARM)
+TIME_STEP = .00001 #0.01
 
 def side_from_arm(arm):
     side = arm.split('_')[0]

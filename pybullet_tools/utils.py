@@ -796,7 +796,7 @@ def get_urdf_flags(cache=False, cylinder=False):
         flags |= p.URDF_ENABLE_CACHED_GRAPHICS_SHAPES
     if cylinder:
         flags |= p.URDF_USE_IMPLICIT_CYLINDER
-    return flags
+    return flags | p.URDF_USE_INERTIA_FROM_FILE
 
 def load_pybullet(filename, fixed_base=False, scale=1., **kwargs):
     # fixed_base=False implies infinite base mass
@@ -3153,7 +3153,7 @@ def approximate_as_cylinder(body, **kwargs):
 
 # Collision
 
-MAX_DISTANCE = 0.05 # 0. | 1e-3
+MAX_DISTANCE = 0.04 # 0. | 1e-3
 
 CollisionPair = namedtuple('Collision', ['body', 'links'])
 
@@ -3244,8 +3244,6 @@ def any_link_pair_collision(body1, links1, body2, links2=None, **kwargs):
         if (body1 == body2) and (link1 == link2):
             continue
         if pairwise_link_collision(body1, link1, body2, link2, **kwargs):
-            print("pairwise link collision")
-            print(f'body1: {body1}, link1:{link1}, body2: {body2}, link2: {link2}')
             return True
     return False
 

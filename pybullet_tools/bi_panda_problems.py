@@ -2,7 +2,7 @@ import numpy as np
 from itertools import product
 
 from .panda_utils import set_arm_conf, REST_LEFT_ARM, open_arm, \
-    close_arm, get_carry_conf, arm_conf, get_other_arm, set_group_conf, create_gripper
+    close_arm, get_carry_conf, arm_conf, get_other_arm, set_group_conf, create_gripper, TIME_STEP
 from .utils import create_box, set_base_values, set_point, set_pose, get_pose, \
     get_bodies, z_rotation, load_model, load_pybullet, HideOutput, create_body, \
     get_box_geometry, get_cylinder_geometry, create_shape_array, unit_pose, Pose, BI_PANDA_URDF, \
@@ -18,7 +18,7 @@ class Problem(object):
                  goal_conf=None, goal_holding=tuple(), goal_on=tuple(),
                  goal_cleaned=tuple(), goal_cooked=tuple(), costs=False,
                  body_names={}, body_types=[], base_limits=None, holding_arm = None,
-                 holding_grasp = None, target_width=0, post_goal=None, gripper_ori=None, time_step=.01):
+                 holding_grasp = None, target_width=0, post_goal=None, gripper_ori=None, time_step=TIME_STEP):
         self.robot = robot
         self.arms = arms
         self.movable = movable
