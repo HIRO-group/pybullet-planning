@@ -206,7 +206,7 @@ def set_joint_force_limits(robot, arm):
 ######################################
 MASS = 6
 
-METHOD = 'rne'
+METHOD = 'nov'
 
 def get_mass_global():
     global MASS
@@ -324,7 +324,6 @@ class Trajectory(Command):
 
 
             J = np.concatenate((Jl, Ja), axis=1)
-            # J = np.vstack([np.asarray(Jl), np.asarray(Ja)])
 
             Jt = np.transpose(J)
 
@@ -342,7 +341,6 @@ class Trajectory(Command):
             # with open(self.file3, 'a') as file:
             #     writer = csv.writer(file)
             #     writer.writerow(eoatVelocity)
-            # wait_for_duration(.01)
             yield
         print('finished conf assigns')
         end_conf = self.path[-1]
@@ -769,7 +767,7 @@ def get_torque_limits_not_exceded_test_v2(problem, arm, mass=None):
     for joint in joints:
             max_limits.append(get_max_force(problem.robot, joint))
     ee_link = get_gripper_link(robot, arm)
-    EPS =  1
+    EPS =  .75
     totalMass = mass
     if totalMass is None:
         totalMass = get_mass(problem.movable[-1])
@@ -857,6 +855,57 @@ def get_torque_limits_not_exceded_test_v3(problem, arm, mass=None):
         if velocities == None or accelerations == None:
             velocities = [0]*len(poses)
             accelerations = [0]*len(poses)
+
+        hold = get_joint_positions(robot, joints)
+        set_joint_positions(robot, joints, poses)
+        linkPose = get_link_pose(robot, lastLink)
+        toolPose = get_link_pose(robot, tool_link)
+        set_joint_positions(robot, joints, poses)
+
+        linearR = np.subtract(toolPose[0], linkPose[0])
+        angularR = np.subtract(toolPose[1], linkPose[1])
+        R = quaternion_matrix(angularR)[:3, :3]
+        r = np.matmul(R, linearR)
+        dynamModel.payload(totalMass, r)
+        torques = dynamModel.rne(poses, velocities, accelerations)
+        for i in range(len(max_limits)-1):
+            if (abs(torques[i]) >= max_limits[i]*EPS):
+                # print("torque test: FAILED", i, torques[i])
+                # print("Velocities: ", velocities)
+                # print("Accelerations: ", accelerations)
+                dynamModel.payload(0)
+                return False
+        dynamModel.payload(0)
+        # print("torque test: PASSED")
+        return True
+
+    return test
+
+def get_torque_limits_not_exceded_test_v3_nov(problem, arm, mass=None):
+    robot = problem.robot
+    max_limits = []
+    baseLink = 1
+    joints = get_arm_joints(robot, arm)
+    a = arm_from_arm(arm)
+    lastLink = link_from_name(robot, BI_PANDA_LINK_GROUPS[a][-2])
+    tool_link = link_from_name(robot, PANDA_TOOL_FRAMES[arm])
+    for joint in joints:
+            max_limits.append(get_max_force(problem.robot, joint))
+    ee_link = get_gripper_link(robot, arm)
+
+    EPS =  1
+    totalMass = mass
+    if totalMass is None:
+        totalMass = get_mass(problem.movable[-1])
+    comR = []
+    dynamModel = Panda()
+    totalMass = 0
+    def test(poses = None, ptotalMass = None, velocities=None, accelerations=None):
+        totalMass = ptotalMass
+        if totalMass is None:
+            totalMass = get_mass(problem.movable[-1])
+        velocities = [0]*len(poses)
+        accelerations = [0]*len(poses)
 
         hold = get_joint_positions(robot, joints)
         set_joint_positions(robot, joints, poses)
@@ -1138,6 +1187,8 @@ def get_ik_fn_force_aware(problem, custom_limits={}, collisions=True, teleport=T
         torque_test_right = get_torque_limits_not_exceded_test_v2(problem, 'right')
     elif METHOD == "base":
         torque_test_right = get_torque_limits_not_exceded_test_base(problem, 'right')
+    elif METHOD == "nov":
+        torque_test_right = get_torque_limits_not_exceded_test_v3_nov(problem, 'right')
     timestamp = str(datetime.datetime.now())
     timestamp = "{}_{}".format(timestamp.split(' ')[0], timestamp.split(' ')[1])
     def fn(arm, obj, pose, grasp, reconfig=None):
