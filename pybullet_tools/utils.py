@@ -3749,7 +3749,7 @@ def plan_joint_motion_force_aware(body, joints, end_conf, torque_fn, dynam_fn, o
 
     if not check_initial_end_force_aware(start_conf, end_conf, collision_fn, torque_fn):
         return None, None, None
-    return rrt_star_force_aware(start_conf, end_conf, distance_fn, sample_fn, extend_fn, collision_fn, torque_fn, dynam_fn, radius=[0], **kwargs)
+    return rrt_star_force_aware(start_conf, end_conf, distance_fn, sample_fn, extend_fn, collision_fn, torque_fn, dynam_fn, radius=[0.01], **kwargs)
     #return plan_lazy_prm(start_conf, end_conf, sample_fn, extend_fn, collision_fn)
 
 plan_holonomic_motion = plan_joint_motion
@@ -4328,12 +4328,10 @@ def velocity_control_joints(body, joints, velocities):
 def compute_jacobian(robot, link, positions=None, joints=None, velocities=None, accelerations=None):
     if not joints:
         joints = get_movable_joints(robot)
-    if positions:
-        print(len(joints), len(positions))
     if positions is None:
         positions = get_joint_positions(robot, joints)
     assert len(joints) == len(positions)
-    if velocities == None:
+    if velocities is None:
         velocities = [0.0] * len(positions)
     else:
         velocities += [0]*(len(joints)-len(velocities))
@@ -4341,7 +4339,6 @@ def compute_jacobian(robot, link, positions=None, joints=None, velocities=None, 
         accelerations = [0.0] * len(positions)
     else:
         accelerations += [0]*(len(joints)-len(accelerations))
-    print(len(velocities), len(accelerations))
     translate, rotate = p.calculateJacobian(robot, link, unit_point(), positions,
                                             velocities, accelerations, physicsClientId=CLIENT)
     #movable_from_joints(robot, joints)
@@ -5205,3 +5202,4 @@ def get_same_relative_pose(pose, prevTargetPose, targetPose):
                 targetPose[0][1] + rel_pose[1],
                 targetPose[0][2] + rel_pose[2]), pose[1])
     return new_pose
+

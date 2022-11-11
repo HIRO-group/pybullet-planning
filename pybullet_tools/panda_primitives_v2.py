@@ -8,8 +8,11 @@ import pybullet as p
 import random
 import numpy as np
 import time
+from .rne import rne as RNE
+from .rne import add_payload, remove_payload
 from itertools import islice, count
-from .panda_model import Panda
+# from .panda_model import Panda
+from roboticstoolbox.models.URDF import Panda
 import numpy as np
 import scipy
 from .ikfast.franka_panda.ik import is_ik_compiled, ikfast_inverse_kinematics, PANDA_LEFT_INFO, bi_panda_inverse_kinematics, PANDA_RIGHT_INFO
@@ -39,7 +42,11 @@ import csv
 import roboticstoolbox as rtb
 import panda_dynamics_model as pdm
 import datetime
-from .transformations import quaternion_matrix
+from .transformations import quaternion_matrix, euler_from_quaternion
+from .min_jerk import min_jerk
+from ruckig import InputParameter, OutputParameter, Result, Ruckig
+from ruckig import Trajectory as rTraj
+from spatialmath.spatialvector import SpatialVector
 # GRASP_INFO = {
 #     'top': GraspInfo(lambda body: get_top_grasps(body, under=True, tool_pose=Pose(), max_width=INF,  grasp_length=0),
 #                      approach_pose=Pose(0.1*Point(z=1))),
@@ -204,9 +211,9 @@ def set_joint_force_limits(robot, arm):
         p.changeDynamics(robot, links[i], jointLimitForce=limits.jointMaxForce)
 
 ######################################
-MASS = 6
+MASS = 9
 
-METHOD = 'nov'
+METHOD = 'dyn'
 
 def get_mass_global():
     global MASS
@@ -216,67 +223,85 @@ def set_mass_global(mass):
     global MASS
     MASS = mass
 
-def calc_torques(robot, arm, joints, velocities=None, accelerations=None, mass=None):
+
+L = "panda_link7"
+LL = "r_" + L
+
+def transform_pose_to_link_frame(model, poses, pose, link):
+    euler = euler_from_quat(pose[1])
+    new_pose = SpatialVector([pose[0][0], pose[0][1], pose[0][2], euler[0], euler[1], euler[2]])
+
+    for i in range(7):
+        new_pose = model.links[i].A(poses[i]) * new_pose
+        if model.links[i].name == L:
+            break
+    return [new_pose.data[0][0], new_pose.data[0][1], new_pose.data[0][2]]
+
+def calc_torques(robot, arm, joints, poses = None, velocities=None, accelerations=None, mass=None):
     if mass is None:
         mass = get_mass_global()
     ee_link = get_gripper_link(robot, arm)
     a = arm_from_arm(arm)
-    lastLink = link_from_name(robot, BI_PANDA_LINK_GROUPS[a][-2])
+    lastLink = link_from_name(robot, LL)
     tool_link = link_from_name(robot, PANDA_TOOL_FRAMES[arm])
     linkPose = get_link_pose(robot, lastLink)
     toolPose = get_link_pose(robot, tool_link)
-    linearR = np.subtract(toolPose[0], linkPose[0])
-    angularR = np.subtract(toolPose[1], linkPose[1])
-    R = quaternion_matrix(angularR)[:3, :3]
-    # linearR = np.concatenate((linearR, [1.0]))
-    r = np.matmul(R, linearR)
+    dynamModel = Panda()
+    if poses is None:
+        poses = get_joint_positions(robot, joints)
 
     max_limits = [get_max_force(robot, joint) for joint in joints]
-    dynamModel = Panda()
+
     totalMass = mass
-    poses = get_joint_positions(robot, joints)
-    if velocities == None :
+    # poses = get_joint_positions(robot, joints)
+    if velocities is None :
         velocities = [0]*len(poses)
-    if accelerations == None:
+    if accelerations is None:
         accelerations = [0]*len(poses)
-    dynamModel.payload(totalMass, r)
-    torques = dynamModel.rne(poses, velocities, accelerations)
+    if totalMass > 0.01:
+        r = [0,0,0.03]
+        add_payload(r, totalMass)
+
+    torques = RNE(poses, velocities, accelerations)
+    remove_payload()
     return torques, any(abs(torques[i]) > max_limits[i] for i in range(len(torques)))
 
-# def calc_torques_v2(robot, arm, joints, velocities=None, accelerations=None, mass=2):
-#     hold = get_joint_positions(robot, joints)
-#     set_joint_positions(robot, joints, poses)
-#     accelerations += [0.0] * 2
-#     velocities += [0.0] * 2
-#     Jl, Ja = compute_jacobian(problem.robot, ee_link, velocities=velocities, accelerations=accelerations)
-#     M = pdm.get_mass_matrix(poses)
-#     p = np.ndarray(())
-#     C = pdm.get_coriolis_matrix(np.asarray([poses[:7]], dtype=np.float64).transpose(), np.asarray([velocities[:7]], dtype=np.float64).transpose())
-#     torquesInert = np.matmul(M, accelerations[:7])
-#     torquesC = np.matmul(C, velocities[:7])
-#     torquesG = pdm.get_gravity_vector(poses)
+def calc_torques_v2(robot, arm, joints, poses = None, velocities=None, accelerations=None, mass=2):
+    hold = get_joint_positions(robot, joints)
 
-#     set_joint_positions(robot, joints, hold)
-#     Jl = np.array(Jl).transpose()
-#     Ja = np.array(Ja).transpose()
+    joints = get_arm_joints(robot, arm)
+    max_limits = []
+    for joint in joints:
+            max_limits.append(get_max_force(robot, joint))
+    ee_link = get_gripper_link(robot, arm)
+    poses = get_joint_positions(robot, joints)
+    Jl, Ja = compute_jacobian(robot, ee_link, velocities=velocities, accelerations=accelerations)
+    M = pdm.get_mass_matrix(poses)
+    p = np.ndarray(())
+    pose_array = np.asarray([poses[:7]], dtype=np.float64).transpose()
+    vel_array = np.asarray([velocities[:7]], dtype=np.float64).transpose()
+    C = pdm.get_coriolis_matrix(pose_array, vel_array)
+    torquesInert = np.matmul(M, accelerations[:7])
+    torquesC = np.matmul(C, velocities[:7])
+    torquesG = pdm.get_gravity_vector(poses)
 
-#     J = np.concatenate((Jl, Ja))
+    set_joint_positions(robot, joints, hold)
+    Jl = np.array(Jl).transpose()
+    Ja = np.array(Ja).transpose()
 
-#     print(J.shape)
-#     # J = np.transpose(J)
-#     Jt = np.transpose(J)
-#     print(J.shape)
-#     force = totalMass * 9.81
-#     toolV = np.matmul(J, velocities)
+    J = np.concatenate((Jl, Ja))
+    totalMass = get_mass_global()
+    Jt = np.transpose(J)
+    force = totalMass * 9.81
 
-#     forceReal = np.array([0, 0, force,
-#                             0, 0, 0])
-#     force3d = forceReal
-#     # print(force3d)
-#     # print(len(J), len(J[0]))
-#     torquesExt = np.matmul(Jt, force3d)
-#     torques = torquesExt[:7] + torquesInert + torquesC + torquesG
-#     return torques, any(abs(torques[i]) > max_limits[i] for i in range(len(torques)))
+    forceReal = np.array([0, 0, force,
+                            0, 0, 0])
+    force3d = forceReal
+    # print(force3d)
+    # print(len(J), len(J[0]))
+    torquesExt = np.matmul(Jt, force3d)
+    torques = torquesExt[:7] + torquesInert + torquesC + torquesG
+    return torques, any(abs(torques[i]) > max_limits[i] for i in range(len(torques)))
 
 torques_exceded = False
 class Trajectory(Command):
@@ -294,7 +319,7 @@ class Trajectory(Command):
             self.file3 = f'/home/liam/exp_data/{ts}_eoat_velocity_data_{METHOD}_{MASS}kg.csv'
         # TODO: constructor that takes in this info
     def apply(self, state, sample=1):
-        global torques_exceded
+        torques_exceded = get_torques_exceded_global()
         handles = add_segments(self.to_points()) if self._draw and has_gui() else []
         print('in traj apply')
 
@@ -330,8 +355,9 @@ class Trajectory(Command):
             eoatVelocity = np.matmul(Jt, np.array(velocities))
             prevVels = velocities
             prevTime = curTime
-            torques, hold = calc_torques(conf.body, 'right', conf.joints, velocities=velocities, accelerations=accelerations)
+            torques, hold = calc_torques(conf.body, 'right', conf.joints, poses=conf.values, velocities=velocities, accelerations=accelerations)
             torques_exceded |= hold
+            set_torques_exceded_global(torques_exceded)
             # with open(self.file, 'a') as file:
             #     writer = csv.writer(file)
             #     writer.writerow(torques)
@@ -397,6 +423,10 @@ def get_torques_exceded_global():
 def reset_torques_exceded_global():
     global torques_exceded
     torques_exceded = False
+
+def set_torques_exceded_global(val):
+    global torques_exceded
+    torques_exceded = val
 
 def create_trajectory(robot, joints, path, bodies, velocities=None, accelerations = None, movables=None, ts=None):
     confs = []
@@ -767,7 +797,7 @@ def get_torque_limits_not_exceded_test_v2(problem, arm, mass=None):
     for joint in joints:
             max_limits.append(get_max_force(problem.robot, joint))
     ee_link = get_gripper_link(robot, arm)
-    EPS =  .75
+    EPS =  1
     totalMass = mass
     if totalMass is None:
         totalMass = get_mass(problem.movable[-1])
@@ -778,7 +808,7 @@ def get_torque_limits_not_exceded_test_v2(problem, arm, mass=None):
         print("in torque test")
         if totalMass is None:
             totalMass = get_mass(problem.movable[-1])
-        if velocities == None or accelerations == None:
+        if velocities is None or accelerations is None:
             velocities = [0]*len(poses)
             accelerations = [0]*len(poses)
         with LockRenderer(lock=True):
@@ -801,7 +831,6 @@ def get_torque_limits_not_exceded_test_v2(problem, arm, mass=None):
             J = np.concatenate((Jl, Ja))
 
             print(J.shape)
-            # J = np.transpose(J)
             Jt = np.transpose(J)
             print(J.shape)
             force = totalMass * 9.81
@@ -835,7 +864,7 @@ def get_torque_limits_not_exceded_test_v3(problem, arm, mass=None):
     baseLink = 1
     joints = get_arm_joints(robot, arm)
     a = arm_from_arm(arm)
-    lastLink = link_from_name(robot, BI_PANDA_LINK_GROUPS[a][-2])
+    lastLink = link_from_name(robot, LL)
     tool_link = link_from_name(robot, PANDA_TOOL_FRAMES[arm])
     for joint in joints:
             max_limits.append(get_max_force(problem.robot, joint))
@@ -852,7 +881,7 @@ def get_torque_limits_not_exceded_test_v3(problem, arm, mass=None):
         totalMass = ptotalMass
         if totalMass is None:
             totalMass = get_mass(problem.movable[-1])
-        if velocities == None or accelerations == None:
+        if velocities is None or accelerations is None:
             velocities = [0]*len(poses)
             accelerations = [0]*len(poses)
 
@@ -860,17 +889,14 @@ def get_torque_limits_not_exceded_test_v3(problem, arm, mass=None):
         set_joint_positions(robot, joints, poses)
         linkPose = get_link_pose(robot, lastLink)
         toolPose = get_link_pose(robot, tool_link)
-        set_joint_positions(robot, joints, poses)
-
-        linearR = np.subtract(toolPose[0], linkPose[0])
-        angularR = np.subtract(toolPose[1], linkPose[1])
-        R = quaternion_matrix(angularR)[:3, :3]
-        r = np.matmul(R, linearR)
-        dynamModel.payload(totalMass, r)
+        set_joint_positions(robot, joints, hold)
+        if totalMass > 0.01:
+            r = [0,0,0.1]# transform_pose_to_link_frame(dynamModel, poses, toolPose, L)
+            dynamModel.payload(totalMass, r)
         torques = dynamModel.rne(poses, velocities, accelerations)
         for i in range(len(max_limits)-1):
             if (abs(torques[i]) >= max_limits[i]*EPS):
-                # print("torque test: FAILED", i, torques[i])
+                print("torque test: FAILED", i, torques[i])
                 # print("Velocities: ", velocities)
                 # print("Accelerations: ", accelerations)
                 dynamModel.payload(0)
@@ -881,13 +907,13 @@ def get_torque_limits_not_exceded_test_v3(problem, arm, mass=None):
 
     return test
 
-def get_torque_limits_not_exceded_test_v3_nov(problem, arm, mass=None):
+def get_torque_limits_not_exceded_test_v4(problem, arm, mass=None):
     robot = problem.robot
     max_limits = []
     baseLink = 1
     joints = get_arm_joints(robot, arm)
     a = arm_from_arm(arm)
-    lastLink = link_from_name(robot, BI_PANDA_LINK_GROUPS[a][-2])
+    lastLink = link_from_name(robot, LL)
     tool_link = link_from_name(robot, PANDA_TOOL_FRAMES[arm])
     for joint in joints:
             max_limits.append(get_max_force(problem.robot, joint))
@@ -898,7 +924,48 @@ def get_torque_limits_not_exceded_test_v3_nov(problem, arm, mass=None):
     if totalMass is None:
         totalMass = get_mass(problem.movable[-1])
     comR = []
-    dynamModel = Panda()
+    totalMass = 0
+    def test(poses = None, ptotalMass = None, velocities=None, accelerations=None):
+        totalMass = ptotalMass
+        if totalMass is None:
+            totalMass = get_mass(problem.movable[-1])
+        if velocities is None or accelerations is None:
+            velocities = [0]*len(poses)
+            accelerations = [0]*len(poses)
+        if totalMass > 0.01:
+            r = [0,0,0.03]
+            add_payload(r, totalMass)
+        torques = RNE(poses, velocities, accelerations)
+        for i in range(len(max_limits)-1):
+            if (abs(torques[i]) >= max_limits[i]*EPS):
+                print("torque test: FAILED", i, torques[i])
+                # print("Velocities: ", velocities)
+                # print("Accelerations: ", accelerations)
+                remove_payload()
+                return False
+        # print("torque test: PASSED")
+        remove_payload()
+        return True
+
+    return test
+
+def get_torque_limits_not_exceded_test_v3_nov(problem, arm, mass=None):
+    robot = problem.robot
+    max_limits = []
+    baseLink = 1
+    joints = get_arm_joints(robot, arm)
+    a = arm_from_arm(arm)
+    lastLink = link_from_name(robot, LL)
+    tool_link = link_from_name(robot, PANDA_TOOL_FRAMES[arm])
+    for joint in joints:
+            max_limits.append(get_max_force(problem.robot, joint))
+    ee_link = get_gripper_link(robot, arm)
+
+    EPS =  1
+    totalMass = mass
+    if totalMass is None:
+        totalMass = get_mass(problem.movable[-1])
+    comR = []
     totalMass = 0
     def test(poses = None, ptotalMass = None, velocities=None, accelerations=None):
         totalMass = ptotalMass
@@ -906,28 +973,25 @@ def get_torque_limits_not_exceded_test_v3_nov(problem, arm, mass=None):
             totalMass = get_mass(problem.movable[-1])
         velocities = [0]*len(poses)
         accelerations = [0]*len(poses)
-
         hold = get_joint_positions(robot, joints)
         set_joint_positions(robot, joints, poses)
         linkPose = get_link_pose(robot, lastLink)
         toolPose = get_link_pose(robot, tool_link)
-        set_joint_positions(robot, joints, poses)
 
-        linearR = np.subtract(toolPose[0], linkPose[0])
-        angularR = np.subtract(toolPose[1], linkPose[1])
-        R = quaternion_matrix(angularR)[:3, :3]
-        r = np.matmul(R, linearR)
-        dynamModel.payload(totalMass, r)
-        torques = dynamModel.rne(poses, velocities, accelerations)
+        set_joint_positions(robot, joints, hold)
+        if totalMass > 0.01:
+            r = [0,0,0.05]
+            add_payload(r, totalMass)
+        torques = RNE(poses, velocities, accelerations)
         for i in range(len(max_limits)-1):
             if (abs(torques[i]) >= max_limits[i]*EPS):
-                # print("torque test: FAILED", i, torques[i])
+                print("torque test: FAILED", i, torques[i])
                 # print("Velocities: ", velocities)
                 # print("Accelerations: ", accelerations)
-                dynamModel.payload(0)
+                remove_payload()
                 return False
-        dynamModel.payload(0)
         # print("torque test: PASSED")
+        remove_payload()
         return True
 
     return test
@@ -1183,6 +1247,8 @@ def get_ik_fn_force_aware(problem, custom_limits={}, collisions=True, teleport=T
     torque_test_right = None
     if METHOD == "rne":
         torque_test_right = get_torque_limits_not_exceded_test_v3(problem, 'right')
+    elif METHOD == "arne":
+        torque_test_right = get_torque_limits_not_exceded_test_v4(problem, 'right')
     elif METHOD == "dyn":
         torque_test_right = get_torque_limits_not_exceded_test_v2(problem, 'right')
     elif METHOD == "base":
@@ -1191,6 +1257,7 @@ def get_ik_fn_force_aware(problem, custom_limits={}, collisions=True, teleport=T
         torque_test_right = get_torque_limits_not_exceded_test_v3_nov(problem, 'right')
     timestamp = str(datetime.datetime.now())
     timestamp = "{}_{}".format(timestamp.split(' ')[0], timestamp.split(' ')[1])
+
     def fn(arm, obj, pose, grasp, reconfig=None):
         torque_test = torque_test_left if arm == 'left' else torque_test_right
         approach_obstacles = {obst for obst in obstacles if not is_placement(obj, obst)}
@@ -1201,8 +1268,9 @@ def get_ik_fn_force_aware(problem, custom_limits={}, collisions=True, teleport=T
         pick_grasp = get_pick_grasp()
         # arm_link = link_from_name(robot, 'r_panda_link8')
         arm_joints = get_arm_joints(robot, arm)
+        max_velocities = get_max_velocities(problem.robot, arm_joints)
         resolutions = 0.1**np.ones(len(arm_joints))
-        dynam_fn = get_dynamics_fn_v3(problem, resolutions)
+        dynam_fn = get_dynamics_fn_v4(problem, resolutions)
         objMass = get_mass(obj)
         objPose = get_pose(obj)[0]
         default_conf = arm_conf(arm, grasp.carry)
@@ -1243,8 +1311,9 @@ def get_ik_fn_force_aware(problem, custom_limits={}, collisions=True, teleport=T
             #                                   restarts=4, iterations=25, smooth=25)
             approach_path, approach_vels, approach_accels = plan_joint_motion_force_aware(robot, arm_joints, grasp_conf, torque_test, dynam_fn, attachments=attachments.values(),
                                               obstacles=obstacles, self_collisions=SELF_COLLISIONS, max_time=50,
-                                              custom_limits=custom_limits, radius=resolutions,
-                                              max_iterations=25)
+                                              custom_limits=custom_limits, radius=resolutions/2,
+                                              max_iterations=50)
+            # approach_path, approach_vels, approach_accels = ruckig_path_planner(default_conf, grasp_conf, torque_test, arm_joints, max_velocities)
             if approach_path is None:
                 print('Approach path failure')
                 return None
@@ -1803,7 +1872,7 @@ def create_graph(start_conf, end_conf, step_size = [], root = None):
     if len(step_size) == 0:
         for i in range(len(start_conf)):
             step_size.append((end_conf[i] - start_conf[i])/num_steps)
-    if root == None:
+    if root is None:
         root = Node(start_conf)
     for i in range(len(start_conf)):
         if check_eq_conf([start_conf[i]], [end_conf[i]]):
@@ -1902,178 +1971,6 @@ def greedy_find_waypoints_stable_gripper(start_conf, end_conf, target_ori, joint
     print("(((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((",path)
     return path
 
-
-def get_dynamics_fn_v2(problem):
-    from numpy.linalg import inv
-
-    def min_jerk(pos=None, dur=None, vel=None, acc=None, psg=None):
-        pos = np.array(pos)
-        N = pos.shape[0]					# number of point
-        D = pos.shape[1]					# dimensionality
-
-        if not vel:
-            vel = np.zeros((2,D))			# default endpoint vel is 0
-        if not acc:
-            acc = np.zeros((2,D))			# default endpoint acc is 0
-
-        t0 = np.array([[0],[dur]])
-
-        if not psg:					# passage times unknown, optimize
-            if N > 2:
-                psg = np.arange(dur/(N-1), dur-dur/(N-1)+1, dur/(N-1)).T
-                func = lambda psg_: mjCOST(psg_, pos, vel, acc, t0)
-                psg = scipy.optimize.fmin(func = func, x0 = psg)
-            else:
-                psg = []
-
-        print(psg)
-        trj, vels, accels = mjTRJ(psg, pos, vel, acc, t0, dur)
-
-        return trj, psg, vels, accels
-
-    ################################################################
-    ###### Compute jerk cost
-    ################################################################
-
-    def mjCOST(t, x, v0, a0, t0):
-
-        N = max(x.shape)
-        D = min(x.shape)
-
-        v, a = mjVelAcc(t, x, v0, a0, t0)
-        aa   = np.concatenate(([a0[0][:]], a, [a0[1][:]]), axis = 0)
-        aa0  = aa[0:N-1][:]
-        aa1  = aa[1:N][:]
-        vv   = np.concatenate(([v0[0][:]], v, [v0[1][:]]), axis = 0)
-        vv0  = vv[0:N-1][:]
-        vv1  = vv[1:N][:]
-        tt   = np.concatenate((t0[0]   , t, t0[1]   ), axis = 0)
-        T    = np.diff(tt)[np.newaxis].T*np.ones((1,D))
-        xx0  = x[0:N-1][:]
-        xx1  = x[1:N][:]
-
-        j=3*(3*aa0**2*T**4-2*aa0*aa1*T**4+3*aa1**2*T**4+24*aa0*T**3*vv0- \
-            16*aa1*T**3*vv0 + 64*T**2*vv0**2 + 16*aa0*T**3*vv1 - \
-            24*aa1*T**3*vv1 + 112*T**2*vv0*vv1 + 64*T**2*vv1**2 + \
-            40*aa0*T**2*xx0 - 40*aa1*T**2*xx0 + 240*T*vv0*xx0 + \
-            240*T*vv1*xx0 + 240*xx0**2 - 40*aa0*T**2*xx1 + 40*aa1*T**2*xx1- \
-            240*T*vv0*xx1 - 240*T*vv1*xx1 - 480*xx0*xx1 + 240*xx1**2)/T**5
-
-        J = sum(sum(abs(j)))
-
-        return J
-
-    ################################################################
-    ###### Compute trajectory
-    ################################################################
-
-    def mjTRJ(tx, x, v0, a0, t0, P):
-
-        N = max(x.shape)
-        D = min(x.shape)
-        X_list = []
-        v, a = mjVelAcc(tx, x, v0, a0, t0)
-        aa   = np.concatenate(([a0[0][:]],  a, [a0[1][:]]), axis = 0)
-        vv   = np.concatenate(([v0[0][:]],  v, [v0[1][:]]), axis = 0)
-        tt   = np.concatenate((t0[0], tx,t0[1]), axis = 0)
-
-        ii = 0
-        for i in range(1,int(P)+1):
-            t = (i-1)/(P-1)*(t0[1]-t0[0]) + t0[0]
-            if t > tt[ii+1]:
-                ii = ii+1
-            T = (tt[ii+1]-tt[ii])*np.ones((1,D))
-            t = (t-tt[ii])*np.ones((1,D))
-            aa0 = aa[ii][:]
-            aa1 = aa[ii+1][:]
-            vv0 = vv[ii][:]
-            vv1 = vv[ii+1][:]
-            xx0 = x[ii][:]
-            xx1 = x[ii+1][:]
-
-            tmp = aa0*t**2/2 + t*vv0 + xx0 + t**4*(3*aa0*T**2/2 - aa1*T**2 + \
-                                                8*T*vv0 + 7*T*vv1 + 15*xx0 - 15*xx1)/T**4 + \
-                t**5*(-(aa0*T**2)/2 + aa1*T**2/2 - 3*T*vv0 - 3*T*vv1 - 6*xx0+ \
-                        6*xx1)/T**5 + t**3*(-3*aa0*T**2/2 + aa1*T**2/2 - 6*T*vv0 - \
-                                            4*T*vv1 - 10*xx0 + 10*xx1)/T**3
-            X_list.append(tmp)
-
-        X = np.concatenate(X_list)
-
-        return X, vv, aa
-
-    ################################################################
-    ###### Compute intermediate velocities and accelerations
-    ################################################################
-
-    def mjVelAcc(t, x, v0, a0, t0):
-
-        N = max(x.shape)
-        D = min(x.shape)
-        mat = np.zeros((2*N-4,2*N-4))
-        vec = np.zeros((2*N-4,D))
-        tt = np.concatenate((t0[0], t, t0[1]), axis = 0)
-
-        for i in range(1, 2*N-4+1, 2):
-
-            ii = int(math.ceil(i/2.0))
-            T0 = tt[ii]-tt[ii-1]
-            T1 = tt[ii+1]-tt[ii]
-
-            tmp = [-6/T0, -48/T0**2, 18*(1/T0+1/T1), \
-                72*(1/T1**2-1/T0**2), -6/T1, 48/T1**2]
-
-            if i == 1:
-                le = 0
-            else:
-                le = -2
-
-            if i == 2*N-5:
-                ri = 1
-            else:
-                ri = 3
-
-            mat[i-1][i+le-1:i+ri] = tmp[3+le-1:3+ri]
-            vec[i-1][:] = 120*(x[ii-1][:]-x[ii][:])/T0**3 \
-                        + 120*(x[ii+1][:]-x[ii][:])/T1**3
-
-        for i in range(2, 2*N-4+1, 2):
-
-            ii = int(math.ceil(i/2.0))
-            T0 = tt[ii]-tt[ii-1]
-            T1 = tt[ii+1]-tt[ii]
-
-            tmp = [48/T0**2, 336/T0**3, 72*(1/T1**2-1/T0**2), \
-                384*(1/T1**3+1/T0**3), -48/T1**2, 336/T1**3]
-
-            if i == 2:
-                le = -1
-            else:
-                le = -3
-
-            if i == 2*N-4:
-                ri = 0
-            else:
-                ri = 2
-
-            mat[i-1][i+le-1:i+ri] = tmp[4+le-1:4+ri]
-            vec[i-1][:] = 720*(x[ii][:]-x[ii-1][:])/T0**4 \
-                        + 720*(x[ii+1][:]-x[ii][:])/T1**4
-
-        T0 = tt[1] - tt[0]
-        T1 = tt[N-1]-tt[N-2]
-        vec[0][:] = vec[0][:] +  6/T0*a0[0][:]    +  48/T0**2*v0[0][:]
-        vec[1][:] = vec[1][:] - 48/T0**2*a0[0][:] - 336/T0**3*v0[0][:]
-        vec[2*N-6][:] = vec[2*N-6][:] +  6/T1*a0[1][:]    -  48/T1**2*v0[1][:]
-        vec[2*N-5][:] = vec[2*N-5][:] + 48/T1**2*a0[1][:] - 336/T1**3*v0[1][:]
-
-        avav = inv(mat).dot(vec)
-        a = avav[0:2*N-4:2][:]
-        v = avav[1:2*N-4:2][:]
-
-        return v, a
-    return min_jerk
-
 def get_dynamics_fn_v3(problem, resolutions):
     from ruckig import InputParameter, OutputParameter, Result, Ruckig
     from ruckig import Trajectory as rTraj
@@ -2083,8 +1980,8 @@ def get_dynamics_fn_v3(problem, resolutions):
     max_velocities = get_max_velocities(problem.robot, arm_joints)
     def dynam_fn(path, dur = None, vel0 = [0.0]*num_joints, acc0=[0.0]*num_joints):
         otg = Ruckig(num_joints, .001, 100)  # DoFs, control cycle rate, maximum number of intermediate waypoints for memory allocation
-        inp = InputParameter(num_joints)  # DoFs
-        out = OutputParameter(num_joints, len(path))  # DoFs, maximum number of intermediate waypoints for memory allocation
+        inp = InputParameter(num_joints, 100)  # DoFs
+        out = OutputParameter(num_joints, 100)  # DoFs, maximum number of intermediate waypoints for memory allocation
         inp.current_position = path[0]
         inp.current_velocity = vel0
         inp.current_acceleration = acc0
@@ -2100,27 +1997,22 @@ def get_dynamics_fn_v3(problem, resolutions):
         inp.max_jerk = [7500, 3750, 5000, 6250, 7500, 10000, 10000]
         first_output, out_list = None, []
         res = Result.Working
-        # try:
-        #     otg.calculate(inp, traj)
-        # except RuntimeError as e:
-        #     print('experienced runtime error returning no path')
-        #     return None, None, None, None
         while res == Result.Working:
-            try:
+            # try:
                 res = otg.update(inp, out)
-                # print('\t'.join([f'{out.time:0.3f}'] + [f'{p:0.3f}' for p in out.new_position]))
+                print('\t'.join([f'{out.time:0.3f}'] + [f'{p:0.3f}' for p in out.new_position]))
                 out_list.append(copy_fn(out))
 
                 out.pass_to_input(inp)
 
                 if not first_output:
                     first_output = copy_fn(out)
-            except RuntimeError as e:
-                print('experienced runtime error returning no path')
-                del inp
-                del out
-                del otg
-                return None, None, None, None
+            # except RuntimeError as e:
+            #     print('experienced runtime error returning no path')
+            #     del inp
+            #     del out
+            #     del otg
+            #     return None, None, None, None
         trj = []
         psg = []
         vels = []
@@ -2135,6 +2027,60 @@ def get_dynamics_fn_v3(problem, resolutions):
         return trj, psg, vels, accels
 
     return dynam_fn
+
+def ruckig_path_planner(q1, q2, torque_fn, arm_joints, max_velocities):
+    num_joints = len(arm_joints)
+    vel0 = [0.0]*num_joints
+    acc0=[0.0]*num_joints
+    otg = Ruckig(num_joints, .01, 100)  # DoFs, control cycle rate, maximum number of intermediate waypoints for memory allocation
+    inp = InputParameter(num_joints)  # DoFs
+    out = OutputParameter(num_joints, 100)  # DoFs, maximum number of intermediate waypoints for memory allocation
+    inp.current_position = q1
+    inp.current_velocity = vel0
+    inp.current_acceleration = acc0
+
+    inp.target_position = q2
+    inp.target_velocity = [0.0]*num_joints
+    inp.target_acceleration = [0.0]*num_joints
+
+    inp.max_velocity = max_velocities
+    inp.max_acceleration = [15, 7.5, 10, 12.5, 15, 20, 20]
+    inp.max_jerk = [7500, 3750, 5000, 6250, 7500, 10000, 10000]
+    first_output, out_list = None, []
+    res = Result.Working
+    while res == Result.Working:
+        try:
+            res = otg.update(inp, out)
+            # print('\t'.join([f'{out.time:0.3f}'] + [f'{p:0.3f}' for p in out.new_position]))
+            out_list.append(copy_fn(out))
+            pt = out_list[-1]
+            if not torque_fn(pt.new_position, None, pt.new_velocity, pt.new_acceleration):
+                del inp
+                del out
+                del otg
+                return None, None, None
+            out.pass_to_input(inp)
+
+            if not first_output:
+                first_output = copy_fn(out)
+        except RuntimeError as e:
+            print('experienced runtime error returning no path')
+            del inp
+            del out
+            del otg
+            return None, None, None
+    trj = []
+    vels = []
+    accels = []
+    for pt in out_list:
+        trj.append(pt.new_position)
+        vels.append(pt.new_velocity)
+        accels.append(pt.new_acceleration)
+    del inp
+    del out
+    del otg
+    return trj, vels, accels
+
 
 def get_dynamics_fn_base(problem, resolutions):
     max_velocities = get_max_velocities(problem.robot, arm_joints)
@@ -2153,4 +2099,14 @@ def get_dynamics_fn_base(problem, resolutions):
             accels.append(pt.new_acceleration)
         return trj, psg, vels, accels
 
+    return dynam_fn
+
+def get_dynamics_fn_v4(problem, resolutions):
+    arm_joints = get_arm_joints(problem.robot, arm_from_arm('right'))
+    num_joints = len(arm_joints)
+    max_velocities = get_max_velocities(problem.robot, arm_joints)
+    def dynam_fn(path, dur = None, vel0 = [0.0]*num_joints, acc0=[0.0]*num_joints):
+        print("run min jerk")
+        psg = np.array([1/(len(path)-1)]*(len(path)-1))
+        return min_jerk(np.array(path), dur=len(path)-1)
     return dynam_fn

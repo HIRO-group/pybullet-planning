@@ -2,14 +2,21 @@ import numpy as np
 from itertools import product
 
 from .panda_utils import set_arm_conf, REST_LEFT_ARM, open_arm, \
-    close_arm, get_carry_conf, arm_conf, get_other_arm, set_group_conf, create_gripper, TIME_STEP
+    close_arm, get_carry_conf, arm_conf, get_other_arm, set_group_conf, create_gripper, TIME_STEP,\
+    get_gripper_link, arm_from_arm, BI_PANDA_LINK_GROUPS, PANDA_TOOL_FRAMES, get_arm_joints
 from .utils import create_box, set_base_values, set_point, set_pose, get_pose, \
     get_bodies, z_rotation, load_model, load_pybullet, HideOutput, create_body, \
     get_box_geometry, get_cylinder_geometry, create_shape_array, unit_pose, Pose, BI_PANDA_URDF, \
     Point, LockRenderer, FLOOR_URDF, TABLE_URDF, add_data_path, TAN, set_color, BASE_LINK, remove_body, \
-    BI_PANDA_PLATE_URDF, PANDA_OG_URDF, PANDA_MOD_URDF
+    BI_PANDA_PLATE_URDF, PANDA_OG_URDF, PANDA_MOD_URDF, link_from_name, get_link_pose, \
+    get_max_force, get_joint_positions, set_joint_positions, compute_jacobian
+from.transformations import quaternion_matrix
+from .panda_primitives_v2 import get_mass_global
 import pybullet as p
-
+from .panda_model import Panda
+import panda_dynamics_model as pdm
+from .rne import rne as RNE
+from .rne import add_payload, remove_payload
 LIGHT_GREY = (0.7, 0.7, 0.7, 1.)
 
 class Problem(object):
@@ -19,7 +26,7 @@ class Problem(object):
                  goal_cleaned=tuple(), goal_cooked=tuple(), costs=False,
                  body_names={}, body_types=[], base_limits=None, holding_arm = None,
                  holding_grasp = None, target_width=0, post_goal=None, gripper_ori=None,
-                 time_step=TIME_STEP, target=None, target_pose=None, end_grasp=None):
+                 time_step=TIME_STEP, target=None, target_pose=None, end_grasp=None, dist=None):
         self.robot = robot
         self.arms = arms
         self.movable = movable
@@ -49,6 +56,13 @@ class Problem(object):
         self.target = target
         self.target_pose = target_pose
         self.end_grasp = end_grasp
+        self.reach_dist = dist
+        self.solution_confs = []
+        self.solution_vels = []
+        self.solution_accels = []
+        self.solution_torques_rne = []
+        self.solution_torques_dyn = []
+        self.solution_torques_arne = []
 
 
     def get_gripper(self, arm='right', visual=True):
@@ -64,6 +78,100 @@ class Problem(object):
             self.gripper = None
     def __repr__(self):
         return repr(self.__dict__)
+
+    def calc_torques(self, p, pd, pdd, arm='right'):
+        totalMass = get_mass_global()
+        robot = self.robot
+        ee_link = get_gripper_link(robot, arm)
+        a = arm_from_arm(arm)
+        joints = get_arm_joints(robot, arm)
+        lastLink = link_from_name(robot, BI_PANDA_LINK_GROUPS[a][-2])
+        tool_link = link_from_name(robot, PANDA_TOOL_FRAMES[arm])
+        linkPose = get_link_pose(robot, lastLink)
+        toolPose = get_link_pose(robot, tool_link)
+        # linearR = np.concatenate((linearR, [1.0]))
+
+        max_limits = [get_max_force(robot, joint) for joint in joints]
+        dynamModel = Panda()
+        poses = p
+        velocities = pd
+        accelerations = pdd
+        if totalMass > 0.01:
+            r = [0.0,0.0,0.1]
+            dynamModel.payload(totalMass, r)
+        torques = dynamModel.rne(poses, velocities, accelerations)
+        return torques
+
+    def calc_torques_v2(self, poses, velocities=None, accelerations=None, arm="right"):
+        robot = self.robot
+        joints = get_arm_joints(robot, arm)
+        hold = get_joint_positions(robot, joints)
+        max_limits = []
+        for joint in joints:
+                max_limits.append(get_max_force(robot, joint))
+        ee_link = get_gripper_link(robot, arm)
+        with LockRenderer():
+            set_joint_positions(robot, joints, poses)
+            Jl, Ja = compute_jacobian(robot, ee_link, velocities=velocities[:7], accelerations=accelerations[:7])
+            M = pdm.get_mass_matrix(poses)
+            pose_array = np.asarray([poses[:7]], dtype=np.float64).transpose()
+            vel_array = np.asarray([velocities[:7]], dtype=np.float64).transpose()
+            C = pdm.get_coriolis_matrix(pose_array, vel_array)
+            torquesInert = np.matmul(M, accelerations[:7])
+            torquesC = np.matmul(C, velocities[:7])
+            torquesG = pdm.get_gravity_vector(poses)
+
+            set_joint_positions(robot, joints, hold)
+        Jl = np.array(Jl).transpose()
+        Ja = np.array(Ja).transpose()
+
+        J = np.concatenate((Jl, Ja))
+        totalMass = get_mass_global()
+        Jt = np.transpose(J)
+        force = totalMass * 9.81
+        velocities = velocities[:7]
+        accelerations = accelerations[:7]
+        forceReal = np.array([0, 0, force,
+                                0, 0, 0])
+        force3d = forceReal
+
+        torquesExt = np.matmul(Jt, force3d)
+        torques = torquesExt[:7] + torquesInert + torquesC + torquesG
+
+        return torques[:7]
+
+    def calc_torques_v3(self, p, pd, pdd, arm='right'):
+        totalMass = get_mass_global()
+        robot = self.robot
+        ee_link = get_gripper_link(robot, arm)
+        a = arm_from_arm(arm)
+        joints = get_arm_joints(robot, arm)
+        lastLink = link_from_name(robot, BI_PANDA_LINK_GROUPS[a][-2])
+        tool_link = link_from_name(robot, PANDA_TOOL_FRAMES[arm])
+        linkPose = get_link_pose(robot, lastLink)
+        toolPose = get_link_pose(robot, tool_link)
+        # linearR = np.concatenate((linearR, [1.0]))
+
+        max_limits = [get_max_force(robot, joint) for joint in joints]
+        poses = p
+        velocities = pd
+        accelerations = pdd
+        if totalMass > 0.01:
+            r = [0.0,0.0,0.03]
+            add_payload(r, totalMass)
+            # dynamModel.payload(totalMass, r)
+        torques = RNE(poses, velocities, accelerations)
+        remove_payload()
+        return torques
+
+    def extract_traj_data(self, traj):
+        for conf in traj.path:
+            self.solution_confs.append(conf.values)
+            self.solution_vels.append(conf.velocities)
+            self.solution_accels.append(conf.accelerations)
+            self.solution_torques_rne.append(self.calc_torques(conf.values, conf.velocities, conf.accelerations))
+            self.solution_torques_dyn.append(self.calc_torques_v2(conf.values, conf.velocities, conf.accelerations))
+            self.solution_torques_arne.append(self.calc_torques_v3(conf.values, conf.velocities, conf.accelerations))
 
 #######################################################
 

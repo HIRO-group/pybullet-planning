@@ -25,7 +25,7 @@ from .transformations import euler_from_quaternion
 LEFT_ARM = 'left'
 RIGHT_ARM = 'right'
 ARM_NAMES = (LEFT_ARM, RIGHT_ARM)
-TIME_STEP = .00001 #0.01
+TIME_STEP = 1/240 #0.01
 
 def side_from_arm(arm):
     side = arm.split('_')[0]
@@ -117,7 +117,7 @@ TOOL_POSE = Pose()
 
 # Special configurations
 EXTENDED_LEFT_ARM = [0, PI/2, 0.0, 0, 0, PI, PI/4]
-TOP_HOLDING_LEFT_ARM = [0, -PI/6, 0.0, -4*PI/6, 0, PI/2, PI/4]
+TOP_HOLDING_LEFT_ARM = [0, -PI/4, 0.0, -6*PI/8, 0, PI/2, PI/4]
 TOP_HOLDING_TRAJ_START = [0, -5*PI/20, 0.0, -16.5*PI/20, 0, 4.5*PI/8, PI/4]
 # TOP_HOLDING_LEFT_ARM_CENTERED = [PI, PI/4, PI, -5*PI/8, 0, 1.1, PI/3-.1]
 TOP_HOLDING_LEFT_ARM_CENTERED = TOP_HOLDING_LEFT_ARM
