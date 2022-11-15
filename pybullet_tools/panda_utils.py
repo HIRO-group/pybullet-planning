@@ -64,24 +64,24 @@ gripper_from_side = gripper_from_arm
 # }
 
 BI_PANDA_GROUPS = {
-    "base": ["r_panda_joint1"],
+    "base": ["panda_joint1"],
     arm_from_arm(LEFT_ARM): ['l_panda_joint1', 'l_panda_joint2', 'l_panda_joint3','l_panda_joint4',
                             'l_panda_joint5', 'l_panda_joint6', 'l_panda_joint7'],
-    arm_from_arm(RIGHT_ARM): ['r_panda_joint1', 'r_panda_joint2', 'r_panda_joint3','r_panda_joint4',
-                            'r_panda_joint5', 'r_panda_joint6', 'r_panda_joint7'],
+    arm_from_arm(RIGHT_ARM): ['panda_joint1', 'panda_joint2', 'panda_joint3','panda_joint4',
+                            'panda_joint5', 'panda_joint6', 'panda_joint7'],
     # gripper_from_arm(LEFT_ARM): ['l_panda_hand_joint', 'l_panda_finger_joint1',
     #                              'l_panda_finger_joint2', 'l_panda_grasptarget_hand'],
     gripper_from_arm(LEFT_ARM): ['l_panda_hand_joint', 'l_panda_grasptarget_hand'],
-    gripper_from_arm(RIGHT_ARM): ['r_panda_hand_joint', 'r_panda_finger_joint1',
-                                 'r_panda_finger_joint2', 'r_panda_grasptarget_hand'],
+    gripper_from_arm(RIGHT_ARM): ['panda_hand_joint', 'panda_finger_joint1',
+                                 'panda_finger_joint2', 'panda_grasptarget_hand'],
 }
 
 BI_PANDA_LINK_GROUPS = {
     "base": ["bi_panda_base_joint"],
     arm_from_arm(LEFT_ARM): ['l_panda_link1', 'l_panda_link2', 'l_panda_link3','l_panda_link4',
                             'l_panda_link5', 'l_panda_link6', 'l_panda_link7'],
-    arm_from_arm(RIGHT_ARM): ['r_panda_link1', 'r_panda_link2', 'r_panda_link3','r_panda_link4',
-                            'r_panda_link5', 'r_panda_link6', 'r_panda_link7'],
+    arm_from_arm(RIGHT_ARM): ['panda_link1', 'panda_link2', 'panda_link3','panda_link4',
+                            'panda_link5', 'panda_link6', 'panda_link7'],
     # gripper_from_arm(LEFT_ARM): ['l_panda_hand_link', 'l_panda_finger_link1',
     #                              'l_panda_finger_link2', 'l_panda_grasptarget_hand'],
     # gripper_from_arm(RIGHT_ARM): ['r_panda_hand_link', 'r_panda_finger_link1',
@@ -93,13 +93,13 @@ HEAD_LINK_NAME = 'high_def_optical_frame' # high_def_optical_frame | high_def_fr
 
 PANDA_TOOL_FRAMES = {
     LEFT_ARM: 'l_panda_grasptarget',  # l_gripper_palm_link | l_gripper_tool_frame
-    RIGHT_ARM: 'r_panda_grasptarget',  # r_gripper_palm_link | r_gripper_tool_frame
+    RIGHT_ARM: 'panda_grasptarget',  # r_gripper_palm_link | r_gripper_tool_frame
 }
 
 # TODO: deprecate to use the parent of the gripper joints
 PANDA_GRIPPER_ROOTS = {
     LEFT_ARM: 'l_panda_hand',
-    RIGHT_ARM: 'r_panda_hand',
+    RIGHT_ARM: 'panda_hand',
 }
 
 PANDA_BASE_LINK = 'bi_panda_base'
@@ -123,6 +123,8 @@ TOP_HOLDING_TRAJ_START = [0, -5*PI/20, 0.0, -16.5*PI/20, 0, 4.5*PI/8, PI/4]
 TOP_HOLDING_LEFT_ARM_CENTERED = TOP_HOLDING_LEFT_ARM
 SIDE_HOLDING_LEFT_ARM = [0, -PI/3, 0.0, -6*PI/7, PI/2, PI, -PI/4]
 PLATE_GRASP_LEFT_ARM = (-PI/2, PI/2, PI/2, 0, -PI/2, PI, -.8) #conf1 (full extention)
+TORQUE_TEST_LEFT_ARM = [0, PI/2, PI/2, 0, -PI/2, 0, -.8] #conf1 (full extention)
+
 # PLATE_GRASP_LEFT_ARM = (2.738075540455348, -1.0511912675226134, 1.661103190049066, -1.7925175734541483, 2.9376307693720434, 2.560233704556581, 1.9969144035623807) #conf2 (y + .15)
 # PLATE_GRASP_LEFT_ARM = (-2.294879695595039, 1.5832628386682441, 1.7345099367795827, -1.114102236770833, -2.889488979972084, 2.7345415776468744, 0.407272004954351) # Y + .025
 # PLATE_GRASP_LEFT_ARM = (-2.400086654197131, 1.618889500030695, 1.758887915156509, -1.3053175106519026, -2.914795684550244, 2.6507273122946753, 0.407272004954351) # Y + .05

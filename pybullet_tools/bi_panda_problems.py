@@ -63,6 +63,10 @@ class Problem(object):
         self.solution_torques_rne = []
         self.solution_torques_dyn = []
         self.solution_torques_arne = []
+        self.time_steps = [0.0]
+        self.total_time = 0
+        self.traj_exec_times = []
+        self.dts = []
 
 
     def get_gripper(self, arm='right', visual=True):
@@ -165,13 +169,25 @@ class Problem(object):
         return torques
 
     def extract_traj_data(self, traj):
+        traj_time = 0
+        i = 0
+        dts = [0]
+
         for conf in traj.path:
             self.solution_confs.append(conf.values)
             self.solution_vels.append(conf.velocities)
             self.solution_accels.append(conf.accelerations)
-            self.solution_torques_rne.append(self.calc_torques(conf.values, conf.velocities, conf.accelerations))
+            dts.append(conf.dt - dts[-1])
+            # self.solution_torques_rne.append(self.calc_torques(conf.values, conf.velocities, conf.accelerations))
             self.solution_torques_dyn.append(self.calc_torques_v2(conf.values, conf.velocities, conf.accelerations))
             self.solution_torques_arne.append(self.calc_torques_v3(conf.values, conf.velocities, conf.accelerations))
+            self.total_time += dts[-1]
+            self.time_steps.append(conf.dt + self.time_steps[-1])
+
+            traj_time += conf.dt - dts[-1]
+        print(traj_time)
+        self.dts.append(dts)
+        self.traj_exec_times.append(traj_time)
 
 #######################################################
 

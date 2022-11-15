@@ -54,8 +54,8 @@ from spatialmath.spatialvector import SpatialVector
 
 BASE_EXTENT = 2.5
 BASE_LIMITS = (-BASE_EXTENT*np.ones(2), BASE_EXTENT*np.ones(2))
-GRASP_LENGTH = -0.01
-APPROACH_DISTANCE = -.01 + GRASP_LENGTH
+GRASP_LENGTH = 0.05
+APPROACH_DISTANCE = .01 + GRASP_LENGTH
 SELF_COLLISIONS = False
 TABLE = 3
 
@@ -113,7 +113,7 @@ class Grasp(object):
         return 'g{}'.format(id(self) % 1000)
 
 class Conf(object):
-    def __init__(self, body, joints, values=None, init=False, velocities=None, accelerations=None, movables=None):
+    def __init__(self, body, joints, values=None, init=False, velocities=None, accelerations=None, movables=None, dt=None):
         self.body = body
         self.joints = joints
         if values is None:
@@ -123,7 +123,7 @@ class Conf(object):
         self.torque_joints = {}
         self.velocities = velocities[:len(joints)] if velocities is not None else velocities
         self.accelerations = accelerations[:len(joints)] if accelerations is not None else accelerations
-
+        self.dt = dt
         self.movables=movables
 
     @property
@@ -240,13 +240,6 @@ def transform_pose_to_link_frame(model, poses, pose, link):
 def calc_torques(robot, arm, joints, poses = None, velocities=None, accelerations=None, mass=None):
     if mass is None:
         mass = get_mass_global()
-    ee_link = get_gripper_link(robot, arm)
-    a = arm_from_arm(arm)
-    lastLink = link_from_name(robot, LL)
-    tool_link = link_from_name(robot, PANDA_TOOL_FRAMES[arm])
-    linkPose = get_link_pose(robot, lastLink)
-    toolPose = get_link_pose(robot, tool_link)
-    dynamModel = Panda()
     if poses is None:
         poses = get_joint_positions(robot, joints)
 
@@ -355,7 +348,7 @@ class Trajectory(Command):
             eoatVelocity = np.matmul(Jt, np.array(velocities))
             prevVels = velocities
             prevTime = curTime
-            torques, hold = calc_torques(conf.body, 'right', conf.joints, poses=conf.values, velocities=velocities, accelerations=accelerations)
+            torques, hold = calc_torques(conf.body, 'right', conf.joints, poses=conf.values, velocities=conf.velocities, accelerations=conf.accelerations)
             torques_exceded |= hold
             set_torques_exceded_global(torques_exceded)
             # with open(self.file, 'a') as file:
@@ -428,12 +421,12 @@ def set_torques_exceded_global(val):
     global torques_exceded
     torques_exceded = val
 
-def create_trajectory(robot, joints, path, bodies, velocities=None, accelerations = None, movables=None, ts=None):
+def create_trajectory(robot, joints, path, bodies, velocities=None, accelerations = None, movables=None, dts = None, ts=None):
     confs = []
     index = 0
     if velocities is not None:
         for i in range(len(velocities)):
-            confs.append(Conf(robot, joints, path[i], velocities=velocities[i], movables=bodies, accelerations=accelerations[i]))
+            confs.append(Conf(robot, joints, path[i], velocities=velocities[i], movables=bodies, accelerations=accelerations[i], dt=dts[i]))
             index+=1
     for i in range(index, len(path)):
             confs.append(Conf(robot, joints, path[i], velocities=None))
@@ -864,8 +857,6 @@ def get_torque_limits_not_exceded_test_v3(problem, arm, mass=None):
     baseLink = 1
     joints = get_arm_joints(robot, arm)
     a = arm_from_arm(arm)
-    lastLink = link_from_name(robot, LL)
-    tool_link = link_from_name(robot, PANDA_TOOL_FRAMES[arm])
     for joint in joints:
             max_limits.append(get_max_force(problem.robot, joint))
     ee_link = get_gripper_link(robot, arm)
@@ -886,10 +877,7 @@ def get_torque_limits_not_exceded_test_v3(problem, arm, mass=None):
             accelerations = [0]*len(poses)
 
         hold = get_joint_positions(robot, joints)
-        set_joint_positions(robot, joints, poses)
-        linkPose = get_link_pose(robot, lastLink)
-        toolPose = get_link_pose(robot, tool_link)
-        set_joint_positions(robot, joints, hold)
+       
         if totalMass > 0.01:
             r = [0,0,0.1]# transform_pose_to_link_frame(dynamModel, poses, toolPose, L)
             dynamModel.payload(totalMass, r)
@@ -913,11 +901,9 @@ def get_torque_limits_not_exceded_test_v4(problem, arm, mass=None):
     baseLink = 1
     joints = get_arm_joints(robot, arm)
     a = arm_from_arm(arm)
-    lastLink = link_from_name(robot, LL)
-    tool_link = link_from_name(robot, PANDA_TOOL_FRAMES[arm])
+    
     for joint in joints:
             max_limits.append(get_max_force(problem.robot, joint))
-    ee_link = get_gripper_link(robot, arm)
 
     EPS =  1
     totalMass = mass
@@ -954,12 +940,8 @@ def get_torque_limits_not_exceded_test_v3_nov(problem, arm, mass=None):
     max_limits = []
     baseLink = 1
     joints = get_arm_joints(robot, arm)
-    a = arm_from_arm(arm)
-    lastLink = link_from_name(robot, LL)
-    tool_link = link_from_name(robot, PANDA_TOOL_FRAMES[arm])
     for joint in joints:
             max_limits.append(get_max_force(problem.robot, joint))
-    ee_link = get_gripper_link(robot, arm)
 
     EPS =  1
     totalMass = mass
@@ -975,8 +957,6 @@ def get_torque_limits_not_exceded_test_v3_nov(problem, arm, mass=None):
         accelerations = [0]*len(poses)
         hold = get_joint_positions(robot, joints)
         set_joint_positions(robot, joints, poses)
-        linkPose = get_link_pose(robot, lastLink)
-        toolPose = get_link_pose(robot, tool_link)
 
         set_joint_positions(robot, joints, hold)
         if totalMass > 0.01:
@@ -1269,7 +1249,9 @@ def get_ik_fn_force_aware(problem, custom_limits={}, collisions=True, teleport=T
         # arm_link = link_from_name(robot, 'r_panda_link8')
         arm_joints = get_arm_joints(robot, arm)
         max_velocities = get_max_velocities(problem.robot, arm_joints)
-        resolutions = 0.1**np.ones(len(arm_joints))
+        resolutions = 0.2**np.ones(len(arm_joints))
+        print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
+        print(resolutions)
         dynam_fn = get_dynamics_fn_v4(problem, resolutions)
         objMass = get_mass(obj)
         objPose = get_pose(obj)[0]
@@ -1309,7 +1291,7 @@ def get_ik_fn_force_aware(problem, custom_limits={}, collisions=True, teleport=T
             #                                   obstacles=obstacles, self_collisions=SELF_COLLISIONS,
             #                                   custom_limits=custom_limits, resolutions=resolutions,
             #                                   restarts=4, iterations=25, smooth=25)
-            approach_path, approach_vels, approach_accels = plan_joint_motion_force_aware(robot, arm_joints, grasp_conf, torque_test, dynam_fn, attachments=attachments.values(),
+            approach_path, approach_vels, approach_accels, approach_dts = plan_joint_motion_force_aware(robot, arm_joints, grasp_conf, torque_test, dynam_fn, attachments=attachments.values(),
                                               obstacles=obstacles, self_collisions=SELF_COLLISIONS, max_time=50,
                                               custom_limits=custom_limits, radius=resolutions/2,
                                               max_iterations=50)
@@ -1319,7 +1301,7 @@ def get_ik_fn_force_aware(problem, custom_limits={}, collisions=True, teleport=T
                 return None
 
             path = approach_path #+ grasp_path
-        mt = create_trajectory(robot, arm_joints, path, bodies = problem.movable, velocities=approach_vels, accelerations=approach_accels, ts=timestamp)
+        mt = create_trajectory(robot, arm_joints, path, bodies = problem.movable, velocities=approach_vels, accelerations=approach_accels, dts = approach_dts, ts=timestamp)
         if reconfig is not None:
             cmd = Commands(State(attachments=attachments), savers=[BodySaver(robot)], commands=[reconfig, mt])
         else:
@@ -1669,21 +1651,29 @@ class State(object):
             #attach.attachment.assign()
             attachment.assign()
 
-def apply_commands(state, commands, time_step=None, pause=False, **kwargs):
+def apply_commands(state, commands, time_steps=None, pause=False, **kwargs):
     #wait_if_gui('Apply?')
     prev_joints = ()
+    k = 0
     for i, command in enumerate(commands):
         print(i, command)
         print(type(command))
+        print(time_steps)
         for j, _ in enumerate(command.apply(state, **kwargs)):
             state.assign()
             if j == 0:
                 continue
-            if time_step is None:
-                wait_for_duration(TIME_STEP)
-                wait_if_gui('Command {}, Step {}) Next?'.format(i, j))
-            else:
+            if type(time_steps) is list and type(command) == Trajectory and False:
+                time_step = time_steps[k]
+                k+=1
                 wait_for_duration(time_step)
+            else:
+                time_step = 0.1
+                if time_step is None:
+                    wait_for_duration(TIME_STEP)
+                    wait_if_gui('Command {}, Step {}) Next?'.format(i, j))
+                else:
+                    wait_for_duration(time_step)
             # p.stepSimulation()
         if pause:
             wait_if_gui()

@@ -92,6 +92,10 @@ TRAY_URDF = "/home/liam/dev/bi-manual-forceful-manipulation/bi-manual-tamp/examp
 BIN_URDF = "/home/liam/dev/bi-manual-forceful-manipulation/bi-manual-tamp/examples/pybullet/utils/models/bi_panda/bin.urdf"
 TABLE_URDF = "/home/liam/dev/bi-manual-forceful-manipulation/bi-manual-tamp/examples/pybullet/utils/models/bi_panda/table.urdf"
 COKE_URDF = "/home/liam/dev/bi-manual-forceful-manipulation/bi-manual-tamp/examples/pybullet/utils/models/bi_panda/coke.urdf"
+WALL_URDF = "/home/liam/dev/bi-manual-forceful-manipulation/bi-manual-tamp/examples/pybullet/utils/models/bi_panda/wall.urdf"
+HIRO_TABLE_1 = "/home/liam/dev/bi-manual-forceful-manipulation/bi-manual-tamp/examples/pybullet/utils/models/bi_panda/table_panda_HIRO_1.urdf"
+HIRO_TABLE_2 = "/home/liam/dev/bi-manual-forceful-manipulation/bi-manual-tamp/examples/pybullet/utils/models/bi_panda/table_panda_HIRO_2.urdf"
+
 # PyBullet wsg50 robots
 # wsg50_one_motor_gripper.sdf - no visual
 # wsg50_one_motor_gripper_free_base.sdf - seg fault
@@ -1694,6 +1698,8 @@ def set_pose(body, pose):
     p.resetBasePositionAndOrientation(body, point, quat, physicsClientId=CLIENT)
 
 def set_point(body, point):
+    print('###################')
+    print(get_quat(body))
     set_pose(body, (point, get_quat(body)))
 
 def set_quat(body, quat):

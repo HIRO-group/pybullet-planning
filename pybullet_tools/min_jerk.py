@@ -34,8 +34,6 @@ def min_jerk(pos=None, dur=None, vel=None, acc=None, psg=None):
 
     N = pos.shape[0]					# number of point
     D = pos.shape[1]					# dimensionality
-    print("########################################")
-    print(pos.shape)
 
     if vel is None:
         vel = np.zeros((2,D))			# default endpoint vel is 0
@@ -47,8 +45,9 @@ def min_jerk(pos=None, dur=None, vel=None, acc=None, psg=None):
     if psg is None:					# passage times unknown, optimize
         if N > 2:
             psg = np.arange(dur/(N-1), dur-dur/(N-1)+1, dur/(N-1)).T
-            # func = lambda psg_: mjCOST(psg_, pos, vel, acc, t0)
-            # psg = scipy.optimize.fmin(func = func, x0 = psg)
+            func = lambda psg_: mjCOST(psg_, pos, vel, acc, t0)
+            psg = psg
+            # psg = scipy.optimize.fmin_slsqp(func = func, x0 = psg)
         else:
             psg = []
     print(psg)
@@ -56,6 +55,11 @@ def min_jerk(pos=None, dur=None, vel=None, acc=None, psg=None):
     trj, v, a = mjTRJ(psg, pos, vel, acc, t0, dur)
     v = np.append(v, np.array([[0.0]*D]), axis=0)
     a = np.append(a, np.array([[0.0]*D]), axis=0)
+    psg = psg.tolist()
+
+    psg.append(psg[-1])
+    psg.insert(0, 0.0)
+    print(psg)
     return trj, psg, v.tolist(), a.tolist()
 
 ################################################################

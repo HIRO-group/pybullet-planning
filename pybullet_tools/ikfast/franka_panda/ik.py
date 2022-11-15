@@ -12,7 +12,7 @@ from ..ikfast import * # For legacy purposes
 #FRANKA_URDF = "models/franka_description/robots/hand.urdf"
 IK_FRAME = {
     'left': 'l_panda_grasptarget',
-    'right': 'r_panda_grasptarget',
+    'right': 'panda_grasptarget',
 }
 FRANKA_URDF = "models/franka_description/robots/panda_arm_hand.urdf"
 
@@ -22,8 +22,8 @@ PANDA_INFO = IKFastInfo(module_name='franka_panda.ikfast_panda_arm', base_link='
 PANDA_LEFT_INFO = IKFastInfo(module_name='franka_panda.ikfast_panda_arm', base_link='l_panda_link0',
                         ee_link='l_panda_link8', free_joints=['l_panda_joint7'])
 
-PANDA_RIGHT_INFO = IKFastInfo(module_name='franka_panda.ikfast_panda_arm', base_link='r_panda_link0',
-                        ee_link='r_panda_link8', free_joints=['r_panda_joint7'])
+PANDA_RIGHT_INFO = IKFastInfo(module_name='franka_panda.ikfast_panda_arm', base_link='panda_link0',
+                        ee_link='panda_link8', free_joints=['panda_joint7'])
 
 info = {'left': PANDA_LEFT_INFO, 'right': PANDA_RIGHT_INFO}
 
